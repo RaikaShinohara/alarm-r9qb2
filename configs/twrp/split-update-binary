@@ -1,0 +1,203 @@
+#!/sbin/sh
+# Split the internal UFS of the Galaxy S21 FE (SM-G990B2, r9q) for the dual
+# boot: Android keeps the first part of `userdata`, Linux gets an ESP and its
+# own partition after it. Run by TWRP from the ZIP made by make-split-zip.sh.
+#
+#   before:  ... 33 keyrefuge | 34 userdata (all of it)
+#   after:   ... 33 keyrefuge | 34 userdata (ANDROID-PERCENT %) | 35 esp (512 MiB, FAT32) | 36 linux (rest)
+#
+# Same approach as agcarbajo's repartition ZIP for the Galaxy Tab S9 Ultra:
+# exactly one sgdisk call rewrites entry 34 and creates 35/36 (the table is
+# never seen without userdata); every other entry stays byte for byte, so an
+# Odin firmware restore still puts everything back. Shortening userdata
+# destroys Android's data either way (its filesystem would describe a larger
+# partition and Android would loop into recovery), so userdata is remade as
+# f2fs and `metadata` emptied - exactly TWRP's Format Data - and only in the
+# same pass that split the disk: a disk that is already split is never
+# formatted again (an encrypted, working Android looks like noise too).
+#
+# Never touches: any entry other than 34/35/36 and the `metadata` filesystem;
+# super, recovery, boot, the bootloader chain, efs, sec_efs, persist, modem.
+# Never reboots.
+#
+# R9Q_SPLIT_TEST=1: PC test mode (test-split.sh): DISK is an image file, the
+# model check, unmounting, re-reading and formatting are skipped.
+OUTFD=$2
+ZIPFILE=$3
+
+DISK=${R9Q_SPLIT_DISK:-/dev/block/sda}
+UD_GUID=1B81E7E6-F50D-419B-A739-2AEEF8DA3335	# Samsung: type GUID == unique GUID
+ESP_TYPE=C12A7328-F81F-11D2-BA4B-00A0C93EC93B	# EFI system partition
+LINUX_TYPE=0FC63DAF-8483-4772-8E79-3D69D8477DE4	# Linux filesystem (as efs, omr, ... here)
+EXPECT_DISK_GUID=${R9Q_SPLIT_DISK_GUID:-@DISK_GUID@}
+EXPECT_UD_START=${R9Q_SPLIT_UD_START:-3582464}
+ESP_BYTES=536870912				# 512 MiB
+ALIGN_BYTES=2097152				# 2 MiB
+
+ui() { echo "ui_print $*" >> /proc/self/fd/"$OUTFD"; echo "ui_print" >> /proc/self/fd/"$OUTFD"; }
+abort() { ui "ERROR: $*"; ui "The partition table has not been changed."; exit 1; }
+# mksh arithmetic is 32-bit: every sector/byte computation goes through awk
+calc() { awk "BEGIN { printf \"%.0f\", $1 }"; }
+gib() { awk -v s="$1" -v b="$SS" 'BEGIN { printf "%.1f GiB", s * b / 1073741824 }'; }
+field() { sed -n "s/^$1: *\\([^ ]*\\).*/\\1/p"; }
+pname() { sed -n "s/^Partition name: '\\(.*\\)'\$/\\1/p"; }
+
+ui "Galaxy S21 FE (r9q) - split the storage (dual boot)"
+
+# --- 1. right phone, right disk -------------------------------------------------
+if [ -z "$R9Q_SPLIT_TEST" ]; then
+	[ "$(getprop ro.boot.em.model)" = SM-G990B2 ] || abort "this ZIP is only for the SM-G990B2"
+	case "$(readlink -f "$ZIPFILE" 2>/dev/null)" in
+	/data/* | /sdcard/* | /storage/emulated/*)
+		abort "the ZIP is in internal storage, which is what is going to be split and erased. Use a USB drive or adb sideload." ;;
+	esac
+fi
+command -v sgdisk >/dev/null 2>&1 || abort "this recovery has no sgdisk"
+P="$(sgdisk --print "$DISK" 2>/dev/null)" || abort "cannot read the GPT of $DISK"
+DISK_GUID="$(echo "$P" | sed -n 's/^Disk identifier (GUID): //p')"
+[ "$DISK_GUID" = "$EXPECT_DISK_GUID" ] || abort "the disk is not this phone's internal UFS (GUID $DISK_GUID)"
+# "Sector size (logical): 512 bytes" (PC) or "(logical/physical): 4096/4096 bytes" (TWRP)
+SS="$(echo "$P" | sed -n 's/^Sector size (logical[^)]*): \([0-9]*\).*/\1/p')"
+[ -n "$SS" ] || SS="$(blockdev --getss "$DISK" 2>/dev/null)"
+[ -n "$SS" ] || abort "unknown sector size"
+
+I34="$(sgdisk --info=34 "$DISK" 2>/dev/null)"
+[ "$(echo "$I34" | pname)" = userdata ] || abort "entry 34 is not userdata"
+[ "$(echo "$I34" | field 'Partition GUID code')" = "$UD_GUID" ] || abort "entry 34 does not have the userdata type"
+UD_FIRST="$(echo "$I34" | field 'First sector')"
+UD_LAST="$(echo "$I34" | field 'Last sector')"
+[ "$UD_FIRST" = "$EXPECT_UD_START" ] || abort "userdata starts at $UD_FIRST, not at $EXPECT_UD_START"
+[ -n "$UD_LAST" ] || abort "where userdata ends is unknown"
+
+# --- 2. already split? -------------------------------------------------------------
+N35="$(sgdisk --info=35 "$DISK" 2>/dev/null | pname)"
+N36="$(sgdisk --info=36 "$DISK" 2>/dev/null | pname)"
+if [ -n "$N35$N36" ]; then
+	if [ "$N35" = esp ] && [ "$N36" = linux ]; then
+		ui "This phone is already split (userdata, esp, linux)."
+		# a first pass may have split the table without formatting (TWRP's
+		# kernel kept the old one): give the two NEW partitions a filesystem
+		# if they still have none. userdata is never formatted here.
+		if [ -z "$R9Q_SPLIT_TEST" ]; then
+			fat="$(dd if=/dev/block/sda35 bs=1 skip=82 count=5 2>/dev/null)"
+			[ "$fat" = FAT32 ] || { mkfs.fat -F 32 -s 1 -n ESP /dev/block/sda35 >/dev/null 2>&1 && ui "esp: FAT32 ready."; }
+			ext="$(dd if=/dev/block/sda36 bs=1 skip=1080 count=2 2>/dev/null | od -An -tx1 | tr -d ' \n')"
+			[ "$ext" = 53ef ] || { mke2fs -t ext4 -F -q -L linux /dev/block/sda36 >/dev/null 2>&1 && ui "linux: ext4 ready."; }
+		fi
+		ui "Next step: install Android and then the Arch ZIP."
+		exit 0
+	fi
+	abort "there are already partitions 35/36 ('$N35', '$N36') this ZIP did not create: left alone"
+fi
+
+# --- 3. the plan -------------------------------------------------------------------
+PCT="$(unzip -p "$ZIPFILE" ANDROID-PERCENT 2>/dev/null | tr -dc '0-9')"
+[ -n "$PCT" ] || abort "the ZIP does not say which percentage is for Android"
+PLAN="$(awk -v first="$UD_FIRST" -v last="$UD_LAST" -v pct="$PCT" -v ss="$SS" \
+	-v espb="$ESP_BYTES" -v alb="$ALIGN_BYTES" 'BEGIN {
+	if (pct < 10 || pct > 90) exit 1
+	align = alb / ss; esp = espb / ss
+	total = last - first + 1
+	android = int(total * pct / 100 / align) * align
+	ud_last = first + android - 1
+	esp_first = int((ud_last + align) / align) * align
+	esp_last = esp_first + esp - 1
+	lx_first = esp_last + 1
+	if (lx_first % align) lx_first = int(lx_first / align + 1) * align
+	linux = last - lx_first + 1
+	if (android <= 0 || linux * ss < 8 * 1073741824) exit 1
+	printf "%.0f %.0f %.0f %.0f %.0f %.0f\n", ud_last, esp_first, esp_last, lx_first, android, linux
+}')" || PLAN=""
+[ -n "$PLAN" ] || abort "userdata cannot be split at $PCT %"
+set -- $PLAN
+UD_NEW_LAST=$1 ESP_FIRST=$2 ESP_LAST=$3 LX_FIRST=$4 ANDROID_S=$5 LINUX_S=$6
+
+ui "userdata is split ($(gib "$(calc "$UD_LAST - $UD_FIRST + 1")")):"
+ui "  34 userdata (Android)  $(gib "$ANDROID_S")"
+ui "  35 esp (UEFI)          $(gib "$(calc "$ESP_LAST - $ESP_FIRST + 1")")"
+ui "  36 linux (Arch)        $(gib "$LINUX_S")"
+ui "Everything in internal storage is ERASED."
+# R9Q_SPLIT_DRYRUN=1 (adb shell, from the PC): every check and the plan, no write
+[ -n "$R9Q_SPLIT_DRYRUN" ] && { ui "(dry run: nothing is written)"; exit 0; }
+
+# --- 4. back up the table, next to the ZIP if it can outlive a reboot ---------------
+backup_to() { rm -f "$1"; sgdisk --backup="$1" "$DISK" >/dev/null 2>&1 && [ -s "$1" ]; }
+BACKUP=
+ZD="$(dirname "$ZIPFILE")"
+case "$ZD" in
+/tmp* | /sideload* | "") ;;
+*) backup_to "$ZD/gpt-sda-antes-de-dividir.bin" && BACKUP="$ZD/gpt-sda-antes-de-dividir.bin" ;;
+esac
+[ -n "$BACKUP" ] || { backup_to /tmp/gpt-sda-before-split.bin || abort "cannot save the GPT"; BACKUP=/tmp/gpt-sda-before-split.bin; }
+ui "GPT saved in $BACKUP"
+case "$BACKUP" in /tmp/*) ui "(in RAM: copy it with adb pull $BACKUP if you want to keep it)" ;; esac
+
+# --- 5. the only write to the table -------------------------------------------------
+if [ -z "$R9Q_SPLIT_TEST" ]; then
+	# the kernel re-reads the table only if nothing on sda is mounted (TWRP
+	# also mounts efs/persist/metadata read-only): unmount all of it
+	for m in /sdcard /data/media /data /cache; do umount "$m" 2>/dev/null || umount -l "$m" 2>/dev/null; done
+	for pass in 1 2; do
+		while read -r dev mnt rest; do
+			real="$(readlink -f "$dev" 2>/dev/null)"
+			case "$real" in /dev/block/sda[0-9]*) umount "$mnt" 2>/dev/null || umount -l "$mnt" 2>/dev/null ;; esac
+		done < /proc/mounts
+	done
+fi
+ui "Rewriting the GPT (34, 35, 36)..."
+sgdisk \
+	--set-alignment=1 \
+	--delete=34 \
+	--new=34:"$UD_FIRST":"$UD_NEW_LAST" --typecode=34:"$UD_GUID" \
+	--partition-guid=34:"$UD_GUID" --change-name=34:userdata \
+	--new=35:"$ESP_FIRST":"$ESP_LAST" --typecode=35:"$ESP_TYPE" --change-name=35:esp \
+	--new=36:"$LX_FIRST":"$UD_LAST" --typecode=36:"$LINUX_TYPE" --change-name=36:linux \
+	"$DISK" >/dev/null 2>&1 || {
+	ui "sgdisk failed. To leave it as it was:"
+	ui "  sgdisk --load-backup=$BACKUP $DISK"
+	abort "could not rewrite the table"
+}
+sync
+C34="$(sgdisk --info=34 "$DISK" 2>/dev/null)"
+C35="$(sgdisk --info=35 "$DISK" 2>/dev/null)"
+C36="$(sgdisk --info=36 "$DISK" 2>/dev/null)"
+[ "$(echo "$C34" | field 'Last sector')" = "$UD_NEW_LAST" ] && [ "$(echo "$C34" | pname)" = userdata ] &&
+	[ "$(echo "$C34" | field 'Partition unique GUID')" = "$UD_GUID" ] &&
+	[ "$(echo "$C35" | field 'First sector')" = "$ESP_FIRST" ] && [ "$(echo "$C35" | pname)" = esp ] &&
+	[ "$(echo "$C36" | field 'First sector')" = "$LX_FIRST" ] && [ "$(echo "$C36" | field 'Last sector')" = "$UD_LAST" ] &&
+	[ "$(echo "$C36" | pname)" = linux ] ||
+	{ ui "The table did not come out as asked. Restore it with:"; ui "  sgdisk --load-backup=$BACKUP $DISK"; exit 1; }
+ui "New table written and checked."
+[ -n "$R9Q_SPLIT_TEST" ] && { ui "(test: not formatted)"; exit 0; }
+
+# --- 6. format: Android's data (as Format Data), the ESP and the Linux partition -----
+blockdev --rereadpt "$DISK" >/dev/null 2>&1
+sleep 2
+node() { # node N: /dev/block/sdaN, created from sysfs if ueventd has not yet
+	n=/dev/block/sda$1
+	[ -b "$n" ] && { echo "$n"; return; }
+	d="$(cat /sys/block/sda/sda$1/dev 2>/dev/null)" || return
+	mknod "/tmp/sda$1" b "${d%%:*}" "${d##*:}" 2>/dev/null && echo "/tmp/sda$1"
+}
+UD="$(node 34)"; ES="$(node 35)"; LX="$(node 36)"
+want="$(calc "$ANDROID_S * $SS")"
+if [ -z "$UD" ] || [ -z "$ES" ] || [ -z "$LX" ] || [ "$(blockdev --getsize64 "$UD" 2>/dev/null)" != "$want" ]; then
+	ui "The table is written, but TWRP's kernel still uses the old one."
+	ui "To finish:  Reboot -> Recovery, then Wipe -> Format Data,"
+	ui "and install this ZIP again (it will only format the ESP and linux)."
+	exit 0
+fi
+MD=/dev/block/by-name/metadata
+if [ -b "$MD" ]; then
+	umount "$MD" 2>/dev/null
+	mke2fs -t ext4 -F -q "$MD" >/dev/null 2>&1 && ui "metadata emptied (Android will create new keys)." ||
+		ui "Could not empty metadata: do Wipe -> Format Data."
+fi
+make_f2fs -g android "$UD" >/dev/null 2>&1 || mkfs.f2fs -f "$UD" >/dev/null 2>&1
+MAGIC="$(dd if="$UD" bs=1 skip=1024 count=4 2>/dev/null | od -An -tx1 | tr -d ' \n')"
+[ "$MAGIC" = 1020f5f2 ] && ui "userdata: new f2fs for Android." || ui "userdata did not end up as f2fs: do Wipe -> Format Data."
+mkfs.fat -F 32 -s 1 -n ESP "$ES" >/dev/null 2>&1 && ui "esp: FAT32 ready." || ui "Could not format the ESP."
+mke2fs -t ext4 -F -q -L linux "$LX" >/dev/null 2>&1 && ui "linux: ext4 ready." || ui "Could not format linux."
+sync
+ui "Done. Next: install Android (Odin or your ROM) and then the Arch ZIP."
+exit 0

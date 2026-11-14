@@ -1,0 +1,36 @@
+# Maintainer: RaikaShinohara <321751277+RaikaShinohara@users.noreply.github.com>
+# The Galaxy S21 FE kernel (7.2.13 + kernel/patches + DTS + config),
+# repacked from the postmarketOS build (same binaries, same module
+# signatures). build-packages.sh copies linux-samsung-r9q-<ver>-r<rel>.apk here.
+# Installing it runs mkinitcpio, then device-samsung-r9q's hook builds and
+# flashes boot.img / vendor_boot.img.
+pkgname=linux-samsung-r9q
+_kver=7.2.13
+pkgver=7.2.13
+pkgrel=10
+pkgdesc="Samsung Galaxy S21 FE (SM8350) mainline kernel"
+arch=('aarch64')
+url="https://kernel.org"
+license=('GPL-2.0-only')
+depends=('coreutils' 'kmod' 'mkinitcpio')
+optdepends=('device-samsung-r9q: boot image generation and flashing')
+options=('!strip' '!debug')
+source=("linux-samsung-r9q-$pkgver-r$pkgrel.apk")
+noextract=("linux-samsung-r9q-$pkgver-r$pkgrel.apk")
+sha256sums=('SKIP')
+
+package() {
+	local m="$pkgdir/usr/lib/modules/$_kver"
+	mkdir -p apk
+	tar -xzf "linux-samsung-r9q-$pkgver-r$pkgrel.apk" -C apk 2>/dev/null || true
+	[ -f apk/boot/vmlinuz ] || { echo "kernel image missing in apk"; return 1; }
+
+	mkdir -p "$pkgdir"/usr/lib/modules
+	cp -a apk/usr/lib/modules/$_kver "$pkgdir"/usr/lib/modules/
+	# Arch layout: mkinitcpio's install hook copies this to /boot/vmlinuz-<pkgbase>
+	install -Dm644 apk/boot/vmlinuz "$m"/vmlinuz
+	echo "$pkgname" > "$m"/pkgbase
+	install -Dm644 apk/boot/dtbs/qcom/sm8350-samsung-r9q.dtb "$m"/dtbs/qcom/sm8350-samsung-r9q.dtb
+	install -Dm644 apk/boot/config "$m"/config
+	install -Dm644 apk/boot/System.map "$m"/System.map
+}

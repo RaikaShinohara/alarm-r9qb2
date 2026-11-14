@@ -1,0 +1,23 @@
+#!/bin/sh
+# Root helper (pkexec; polkit action org.r9q.session-set, allowed without a
+# password only for the active local session): choose the next autologin
+# session of plasma-login-manager. The default (gamescope, game mode) is in
+# /usr/lib/plasmalogin/plasmalogin.conf.d/50-r9q-gaming.conf; "reset" goes
+# back to it (done at every boot by r9q-session-default.service).
+set -eu
+conf=/etc/plasmalogin.conf.d/zz-r9q-session.conf
+case "${1:-}" in
+gamescope) session=gamescope-session-steam.desktop ;;
+plasma) session=plasma.desktop ;;
+reset)
+	rm -f "$conf"
+	exit 0
+	;;
+*)
+	echo "usage: $0 gamescope|plasma|reset" >&2
+	exit 2
+	;;
+esac
+mkdir -p "${conf%/*}"
+printf '[Autologin]\nSession=%s\n' "$session" > "$conf.new"
+mv "$conf.new" "$conf"

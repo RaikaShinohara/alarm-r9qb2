@@ -1,0 +1,4 @@
+# rtc-pm8xxx is a module: when it registers, the kernel (CONFIG_RTC_HCTOSYS)
+# sets the clock from the RTC, i.e. back to 1970. Apply the saved offset
+# right after that (r9q-clock).
+ACTION=="add", SUBSYSTEM=="rtc", KERNEL=="rtc0", TAG+="systemd", ENV{SYSTEMD_WANTS}+="r9q-clock.service"

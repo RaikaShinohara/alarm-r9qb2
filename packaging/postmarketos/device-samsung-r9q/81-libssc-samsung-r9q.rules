@@ -1,0 +1,9 @@
+# iio-sensor-proxy with libssc: accelerometer mount matrix (SSC reports in the
+# Android frame; same conversion as the other SSC devices in pmaports)
+SUBSYSTEM=="misc", KERNEL=="fastrpc-*", ENV{ACCEL_MOUNT_MATRIX}+="-1, 0, 0; 0, -1, 0; 0, 0, -1"
+
+# hexagonrpcd-sdsp is only wanted by multi-user.target with
+# ConditionPathExists=/dev/fastrpc-sdsp: when the fastrpc module creates the
+# node after that point the service is skipped for good, the SLPI never gets
+# its sensor registry and there are no sensors. Start it when the node appears.
+SUBSYSTEM=="misc", KERNEL=="fastrpc-sdsp", TAG+="systemd", ENV{SYSTEMD_WANTS}+="hexagonrpcd-sdsp.service"

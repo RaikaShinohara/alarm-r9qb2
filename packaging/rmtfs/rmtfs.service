@@ -1,0 +1,14 @@
+[Unit]
+Description=Qualcomm remotefs service
+Before=NetworkManager.service
+ConditionPathExists=/dev/qcom_rmtfs_mem1
+
+[Service]
+# -r: read-only (EFS = IMEI, RF calibration), -P: partition access via
+# /dev/disk/by-partlabel. No -s: the modem is not booted on this port.
+ExecStart=/usr/bin/rmtfs -r -P
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target

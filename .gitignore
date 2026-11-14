@@ -1,0 +1,48 @@
+# Build products, captures and device-specific files are regenerable.
+artifacts/*
+!artifacts/.gitkeep
+!artifacts/README.md
+work/*
+!work/.gitkeep
+
+# Images, root filesystems, archives and packages
+*.img
+*.img.gz
+*.img.xz
+*.img.zst
+*.zip
+*.apk
+*.pkg.tar*
+*.tar
+*.tar.gz
+*.tar.xz
+*.tar.zst
+*.dtb
+*.dtbo
+
+# Proprietary Samsung/Qualcomm firmware is never versioned here: only the
+# recipes in packaging/ that repack it from the phone's own vendor partition.
+*.mbn
+*.mdt
+*.b[0-9][0-9]
+*.tlv
+*.wmfw
+*.elf
+*.jsn
+
+# Private, per-machine files (they live in work/)
+CREDENTIALS.txt
+known_hosts*
+pmbootstrap-r9q.cfg
+
+# Local kernel checkouts and build trees
+kernel/src/
+__pycache__/
+*.pyc
+*.log
+
+# dual boot build outputs (make -C configs/dualboot)
+configs/dualboot/*.o
+configs/dualboot/*.obj
+configs/dualboot/*.bin
+configs/dualboot/*.efi

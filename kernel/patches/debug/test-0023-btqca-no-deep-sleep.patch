@@ -1,0 +1,17 @@
+--- a/drivers/bluetooth/btqca.c
++++ b/drivers/bluetooth/btqca.c
+@@ -456,10 +456,10 @@
+ 				if (tag_len < 1)
+ 					return -EINVAL;
+ 
+-				/* Sleep enable mask
+-				 * enabling deep sleep feature on controller.
+-				 */
+-				tlv_nvm->data[0] |= 0x01;
++				/* TEST: deep sleep off, to check LE connections */
++				tlv_nvm->data[0] &= ~0x01;
++				BT_INFO("TEST: NVM deep sleep disabled (tag 27 0x%02x)",
++					tlv_nvm->data[0]);
+ 
+ 				break;
+ 			}

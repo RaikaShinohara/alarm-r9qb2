@@ -1,0 +1,15 @@
+# Runs after mkinitcpio's own hook (90-mkinitcpio-install.hook)
+[Trigger]
+Type = Path
+Operation = Install
+Operation = Upgrade
+Target = usr/lib/modules/*/vmlinuz
+Target = usr/lib/initcpio/*
+Target = etc/r9q/bootimg.conf
+Target = usr/lib/systemd/boot/efi/systemd-bootaa64.efi
+
+[Action]
+Description = Updating the Galaxy S21 FE boot files (boot images, or the ESP in dual boot)...
+When = PostTransaction
+Exec = /usr/lib/r9q/r9q-bootimg --flash
+Depends = android-tools

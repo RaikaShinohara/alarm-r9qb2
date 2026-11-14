@@ -1,0 +1,33 @@
+#!/bin/sh
+# USB networking like postmarketOS: a CDC-NCM gadget on the USB-C port,
+# phone at 172.16.42.1, the PC gets 172.16.42.2 by DHCP (r9q-usb-dhcp).
+# Same USB IDs as pmOS so the PC's existing network profile keeps working.
+set -eu
+G=/sys/kernel/config/usb_gadget/g1
+[ -d /sys/kernel/config/usb_gadget ] || mount -t configfs none /sys/kernel/config
+if [ ! -d "$G" ]; then
+	mkdir -p "$G"
+	echo 0x18D1 > "$G"/idVendor
+	echo 0xD001 > "$G"/idProduct
+	mkdir -p "$G"/strings/0x409
+	echo "Samsung" > "$G"/strings/0x409/manufacturer
+	echo "Samsung Galaxy S21 FE 5G (Snapdragon)" > "$G"/strings/0x409/product
+	echo "ArchLinuxARM" > "$G"/strings/0x409/serialnumber
+	mkdir -p "$G"/functions/ncm.usb0
+	mkdir -p "$G"/configs/c.1/strings/0x409
+	echo "USB network" > "$G"/configs/c.1/strings/0x409/configuration
+	ln -s "$G"/functions/ncm.usb0 "$G"/configs/c.1/
+fi
+if [ -z "$(cat "$G"/UDC 2>/dev/null)" ]; then
+	udc=
+	for i in $(seq 1 30); do
+		udc=$(ls /sys/class/udc 2>/dev/null | head -n1)
+		[ -n "$udc" ] && break
+		sleep 1
+	done
+	[ -n "$udc" ] || { echo "no USB device controller"; exit 1; }
+	echo "$udc" > "$G"/UDC
+fi
+ifname=$(cat "$G"/functions/ncm.usb0/ifname)
+ip addr replace 172.16.42.1/24 dev "$ifname"
+ip link set "$ifname" up

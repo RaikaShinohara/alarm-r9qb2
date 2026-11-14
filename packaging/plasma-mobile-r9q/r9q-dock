@@ -1,0 +1,32 @@
+#!/usr/bin/bash
+# Samsung DeX style desktop for Plasma Mobile: whenever a screen is connected
+# to the USB-C port (DP Alt Mode), give every external screen a desktop Plasma
+# panel (r9q-dock.js). Panels stay in plasmashell's layout: unplugging hides
+# them, plugging the screen in again brings them back.
+# Started by /etc/xdg/autostart/r9q-dock.desktop; only in Plasma Mobile.
+set -u
+[ "${PLASMA_PLATFORM:-}" = phone:handset ] || exit 0
+js=$(< /usr/share/r9q/r9q-dock.js)
+
+external() { # true while any DP/HDMI connector reports a screen
+	local s
+	for s in /sys/class/drm/card*-DP-*/status /sys/class/drm/card*-HDMI-*/status; do
+		[ -r "$s" ] && [ "$(< "$s")" = connected ] && return 0
+	done
+	return 1
+}
+
+was=0
+while :; do
+	if external; then now=1; else now=0; fi
+	if [ $now = 1 ] && [ $was = 0 ]; then
+		# give KWin and plasmashell time to bring the new output up
+		for _ in 1 2 3 4 5; do
+			sleep 2
+			busctl --user call org.kde.plasmashell /PlasmaShell org.kde.PlasmaShell \
+				evaluateScript s "$js" && break
+		done
+	fi
+	was=$now
+	sleep 2
+done

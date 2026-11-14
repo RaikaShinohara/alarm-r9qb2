@@ -1,0 +1,8 @@
+# Galaxy S21 FE (r9q) settings for gamescope-session-plus, sourced after
+# /usr/share/gamescope-session-plus/sessions.d/steam. The panel is a
+# 1080x2340 portrait DSI panel (EA8082, 120 Hz) without EDID: run gamescope
+# in landscape and tell Steam it is the internal screen.
+OUTPUT_CONNECTOR=DSI-1
+PANEL_TYPE=internal
+# right: the user's preferred landscape (left was the other way round)
+ORIENTATION=right

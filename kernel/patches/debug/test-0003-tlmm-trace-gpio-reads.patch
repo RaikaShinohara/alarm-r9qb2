@@ -1,0 +1,12 @@
+--- a/drivers/pinctrl/qcom/pinctrl-msm.c
++++ b/drivers/pinctrl/qcom/pinctrl-msm.c
+@@ -602,6 +602,9 @@
+ 
+ static int msm_gpio_get_direction(struct gpio_chip *chip, unsigned int offset)
+ {
++	if (initcall_debug)
++		pr_info("tlmm: reading gpio %u\n", offset);
++
+ 	struct msm_pinctrl *pctrl = gpiochip_get_data(chip);
+ 	const struct msm_pingroup *g;
+ 	u32 val;

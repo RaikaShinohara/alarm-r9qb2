@@ -1,0 +1,16 @@
+# Plasma power management defaults for the phone (users can still change them
+# in System Settings, which writes ~/.config/powerdevilrc).
+# PowerButtonAction=128: ToggleScreenOnOff (like Plasma Mobile); 64 would be
+# TurnOffScreen. AutoSuspendAction=0: never suspend (it does not come back on
+# this phone, docs/porting-log.md). Values: powerdevil daemon/powerdevilenums.h.
+[AC][SuspendAndShutdown]
+PowerButtonAction=128
+AutoSuspendAction=0
+
+[Battery][SuspendAndShutdown]
+PowerButtonAction=128
+AutoSuspendAction=0
+
+[LowBattery][SuspendAndShutdown]
+PowerButtonAction=128
+AutoSuspendAction=0

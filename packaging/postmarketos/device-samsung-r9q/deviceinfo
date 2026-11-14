@@ -1,0 +1,38 @@
+# Reference: <https://postmarketos.org/deviceinfo>
+# Please use double quotes only. You can source this file in shell
+# scripts.
+
+deviceinfo_format_version="0"
+deviceinfo_name="Samsung Galaxy S21 FE 5G (Snapdragon)"
+deviceinfo_manufacturer="Samsung"
+deviceinfo_codename="samsung-r9q"
+deviceinfo_year="2022"
+deviceinfo_dtb="qcom/sm8350-samsung-r9q"
+deviceinfo_arch="aarch64"
+
+# Device related
+deviceinfo_chassis="handset"
+deviceinfo_keyboard="false"
+deviceinfo_external_storage="false"
+deviceinfo_screen_width="1080"
+deviceinfo_screen_height="2340"
+
+# Bootloader related
+# Samsung ABL, non A/B, boot image header v3 + vendor_boot.
+# Values from `unpack_bootimg` of the stock boot.img / vendor_boot.img.
+deviceinfo_generate_bootimg="true"
+deviceinfo_header_version="3"
+deviceinfo_flash_pagesize="4096"
+deviceinfo_bootimg_custom_args="--base 0x00000000 --kernel_offset 0x00008000 --ramdisk_offset 0x02000000 --tags_offset 0x01e00000 --dtb_offset 0x01f00000 --board SRPVC21A007 --os_version 11.0.0 --os_patch_level 2024-06"
+# ABL rewrites console= to console=null. *_ignore_unused keep the display
+# pipeline that the bootloader left running (simple-framebuffer).
+deviceinfo_kernel_cmdline="clk_ignore_unused pd_ignore_unused regulator_ignore_unused panic=10 fbcon=font:TER16x32 panel_samsung_ea8082.refresh_rate=120 deferred_probe_timeout=60"
+deviceinfo_initfs_compression="gzip"
+
+deviceinfo_flash_method="heimdall-bootimg"
+deviceinfo_flash_heimdall_partition_kernel="boot"
+deviceinfo_flash_heimdall_partition_vendor_boot="vendor_boot"
+deviceinfo_flash_heimdall_partition_rootfs="userdata"
+
+# UFS
+deviceinfo_rootfs_image_sector_size="4096"

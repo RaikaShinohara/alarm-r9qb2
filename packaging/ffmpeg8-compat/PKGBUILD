@@ -1,0 +1,51 @@
+# Maintainer: RaikaShinohara <321751277+RaikaShinohara@users.noreply.github.com>
+# FFmpeg 8 libraries for Valve's arm64 Steam client. Its libvideo.so (loaded by
+# steamui.so) links libavcodec.so.62, libavformat.so.62, libavfilter.so.11,
+# libavutil.so.60, libswresample.so.6 and libswscale.so.9, and Valve's arm64
+# runtime does not bring them: since Arch Linux ARM moved to FFmpeg 9 the
+# client failed to start ("libavcodec.so.62: cannot open shared object file")
+# and game mode stayed black. Only the versioned libraries are installed (no
+# programs, headers, pkg-config files or unversioned .so links), so this sits
+# next to the system's FFmpeg 9 without conflicts. Built with FFmpeg's own
+# codecs only (no external libraries): Steam uses it for its UI videos and
+# recording.
+pkgname=ffmpeg8-compat
+pkgver=8.1.2
+pkgrel=1
+pkgdesc="FFmpeg 8 shared libraries for the arm64 Steam client"
+arch=('aarch64')
+url="https://ffmpeg.org"
+license=('LGPL-2.1-or-later')
+makedepends=('nasm')
+depends=('glibc' 'zlib' 'bzip2' 'xz')
+source=("https://ffmpeg.org/releases/ffmpeg-$pkgver.tar.xz")
+# checked against ffmpeg-$pkgver.tar.xz.asc (FFmpeg release signing key
+# FCF986EA15E6E293A5644F10B4322F04D67658D8)
+b2sums=('b37849fd89cdbc336700227c804d7642e0d2e4024359d15f4c3659cd41465145946b362fb61e0dc0141730f1d0352e2a2bf33d513213b2b3b68978be766b5914')
+
+build() {
+	cd "ffmpeg-$pkgver"
+	./configure \
+		--prefix=/usr \
+		--disable-static \
+		--enable-shared \
+		--disable-programs \
+		--disable-doc \
+		--disable-debug \
+		--disable-autodetect \
+		--enable-zlib \
+		--enable-bzlib \
+		--enable-lzma
+	make -j"$(nproc)"
+}
+
+package() {
+	cd "ffmpeg-$pkgver"
+	make DESTDIR="$pkgdir" install-libs
+	# only the versioned libraries: the rest belongs to the system's FFmpeg
+	find "$pkgdir/usr/lib" -maxdepth 1 -name 'lib*.so' -delete
+	rm -rf "$pkgdir/usr/lib/pkgconfig" "$pkgdir/usr/include" "$pkgdir/usr/share"
+	for l in avcodec.so.62 avformat.so.62 avfilter.so.11 avutil.so.60 swresample.so.6 swscale.so.9; do
+		[ -e "$pkgdir/usr/lib/lib$l" ] || { echo "missing lib$l"; return 1; }
+	done
+}

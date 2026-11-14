@@ -1,0 +1,176 @@
+# Maintainer: RaikaShinohara <321751277+RaikaShinohara@users.noreply.github.com>
+#
+# Firmware from the stock SM-G990B2 partitions (vendor, NON-HLOS, modem).
+#
+# Wi-Fi (/vendor/firmware/qca6490): linux-firmware's WCN6855 WLAN.HSP.1.1
+# crashes (MHI RDDM) as soon as it gets Samsung's ELF board file, so ship
+# Samsung's WLAN.HSP.2.0 firmware. The kernel DT sets firmware-name =
+# "samsung-r9q", so ath11k loads amss/m3/regdb from
+# ath11k/WCN6855/hw2.1/samsung-r9q/. Board files are always read from the
+# hw2.1 directory itself; do not install linux-firmware-ath11k next to this,
+# its board-2.bin has a generic entry for this module's PCI IDs
+# (17cb:1103 17cb:0108) that would win.
+#
+# Adreno 660 zap shader and the ADSP/CDSP/SLPI/modem images are signed for
+# this device; they were merged from the stock .mdt + .bNN files with
+# scripts/squash-mdt.py. a660_sqe.fw / a660_gmu.bin come from
+# firmware-qcom-adreno-a660. modem_pr/ holds the carrier configs (mcfg)
+# that tqftpserv serves to the modem.
+#
+# hexagonfs: the files hexagonrpcd serves to the sensor DSP (SLPI), laid out
+# as hexagonrpcd expects under /usr/share/qcom/sm8350/Samsung/r9q (its default
+# guess from the DT model/compatible): dsp/sdsp from the dsp partition,
+# sensors/config + sns_reg.conf from /vendor/etc/sensors, sensors/registry from
+# persist (holds this unit's factory calibration) and socinfo/ with the stock
+# /sys/devices/soc0 values (MTP, subtype 0, soc_id 415, rev 2.1).
+# sensors/sns_reg_version (+ sensors_list.txt, sensors_settings) also come from
+# persist: without it the SSC thinks the registry is stale, tries to rebuild it
+# (endless temp.json writes, denied by hexagonrpcd) and never comes up; the
+# patched hexagonrpcd (device/testing/hexagonrpcd) serves it. sensors/config is
+# left empty on purpose: the persist registry is complete, nothing to rebuild.
+# socinfo/ssc_hw_rev = Samsung SSC board revision (14).
+#
+# audio: Samsung's speaker protection (CSPL 20.1.35) for the two CS35L41
+# amplifiers, from /vendor/firmware/cs35l40-{rcv,bot}-dsp1-spk-prot.*: "rcv"
+# is the top speaker (earpiece), "bot" the bottom one. Both use the same
+# .wmfw, only the tuning .bin differs. The cs35l41 driver asks for
+# cirrus/cs35l41-dsp1-spk-prot-<cirrus,subsystem-id>-<sound-name-prefix>,
+# i.e. samsung-r9q-top / samsung-r9q-bottom. The factory calibration
+# (impedance) is not a file: it is in the DT (cirrus,calibration).
+pkgname=firmware-samsung-r9q
+pkgver=1
+pkgrel=5
+pkgdesc="Firmware for Samsung Galaxy S21 FE 5G (Snapdragon)"
+url="https://postmarketos.org"
+arch="aarch64"
+license="proprietary"
+options="!check !strip !archcheck !tracedeps pmb:cross-native"
+subpackages="
+	$pkgname-adreno:adreno
+	$pkgname-adsp:adsp
+	$pkgname-audio:audio
+	$pkgname-cdsp:cdsp
+	$pkgname-hexagonfs:hexagonfs
+	$pkgname-modem:modem
+	$pkgname-slpi:slpi
+	$pkgname-wifi:wifi
+"
+source="
+	a660_zap.mbn
+	adsp.mbn
+	adspr.jsn
+	adspua.jsn
+	amss20.bin
+	bdwlan.elf
+	cdsp.mbn
+	cdspr.jsn
+	cs35l41-spk-prot.wmfw
+	cs35l41-spk-prot-bottom.bin
+	cs35l41-spk-prot-top.bin
+	hexagonfs.tar.gz
+	m3.bin
+	modem.mbn
+	modem_pr.tar.gz
+	modemr.jsn
+	regdb.bin
+	slpi.mbn
+	slpir.jsn
+	slpius.jsn
+"
+_fwdir=/usr/lib/firmware/qcom/sm8350/samsung/r9q
+
+package() {
+	mkdir -p "$pkgdir"
+}
+
+adreno() {
+	pkgdesc="Samsung Galaxy S21 FE Adreno 660 zap shader"
+
+	install -Dm644 "$srcdir"/a660_zap.mbn -t "$subpkgdir/$_fwdir"/
+}
+
+adsp() {
+	pkgdesc="Samsung Galaxy S21 FE audio DSP firmware"
+
+	install -Dm644 "$srcdir"/adsp.mbn "$srcdir"/adspr.jsn \
+		"$srcdir"/adspua.jsn -t "$subpkgdir/$_fwdir"/
+}
+
+audio() {
+	pkgdesc="Samsung Galaxy S21 FE speaker protection firmware (CS35L41)"
+	local _dir="$subpkgdir"/usr/lib/firmware/cirrus
+	local _fw=cs35l41-dsp1-spk-prot-samsung-r9q
+	local _spk
+
+	for _spk in top bottom; do
+		install -Dm644 "$srcdir"/cs35l41-spk-prot.wmfw "$_dir/$_fw-$_spk.wmfw"
+		install -Dm644 "$srcdir"/cs35l41-spk-prot-$_spk.bin "$_dir/$_fw-$_spk.bin"
+	done
+}
+
+cdsp() {
+	pkgdesc="Samsung Galaxy S21 FE compute DSP firmware"
+
+	install -Dm644 "$srcdir"/cdsp.mbn "$srcdir"/cdspr.jsn \
+		-t "$subpkgdir/$_fwdir"/
+}
+
+hexagonfs() {
+	pkgdesc="Samsung Galaxy S21 FE sensor DSP files for hexagonrpcd"
+	local _dir="$subpkgdir"/usr/share/qcom/sm8350/Samsung/r9q
+
+	mkdir -p "$_dir"
+	cp -r "$srcdir"/hexagonfs/. "$_dir"/
+	find "$_dir" -type d -exec chmod 0755 {} \;
+	find "$_dir" -type f -exec chmod 0644 {} \;
+}
+
+modem() {
+	pkgdesc="Samsung Galaxy S21 FE modem firmware"
+
+	install -Dm644 "$srcdir"/modem.mbn "$srcdir"/modemr.jsn \
+		-t "$subpkgdir/$_fwdir"/
+	cp -r "$srcdir"/modem_pr "$subpkgdir/$_fwdir"/
+	find "$subpkgdir/$_fwdir"/modem_pr -type d -exec chmod 0755 {} \;
+	find "$subpkgdir/$_fwdir"/modem_pr -type f -exec chmod 0644 {} \;
+}
+
+slpi() {
+	pkgdesc="Samsung Galaxy S21 FE sensor DSP firmware"
+
+	install -Dm644 "$srcdir"/slpi.mbn "$srcdir"/slpir.jsn \
+		"$srcdir"/slpius.jsn -t "$subpkgdir/$_fwdir"/
+}
+
+wifi() {
+	pkgdesc="Samsung Galaxy S21 FE Wi-Fi firmware (QCA6490, WLAN.HSP.2.0)"
+	local _dir="$subpkgdir"/usr/lib/firmware/ath11k/WCN6855/hw2.1
+
+	install -Dm644 "$srcdir"/amss20.bin "$_dir"/samsung-r9q/amss.bin
+	install -Dm644 "$srcdir"/m3.bin "$_dir"/samsung-r9q/m3.bin
+	install -Dm644 "$srcdir"/regdb.bin "$_dir"/samsung-r9q/regdb.bin
+	install -Dm644 "$srcdir"/bdwlan.elf "$_dir"/board.bin
+}
+
+sha512sums="
+383a54e47caceb215a4efc9535ef2d21935d85108536f5935e95d0c496d07eb9b9d34335a229c23d1091677051eb5ce2ed329a0a316e6208de0c5a015502e1a1  a660_zap.mbn
+5a223f74fe3e9aa8e47b28835fe089b5d5712a144520d7a70a8d2da534e49b58741f839053c3c43ac66bb2d323c99b0ff195c44ffd6e5b0f2540e35b9899a2c9  adsp.mbn
+a026d6a9188f7cc0e1bc0b572206b5651aefbfdfd86eeed1b14151031814f9714191140dd9c9fb4ebad4da6d76bee14c0f27e2f164dba6749e8a7818d6d9578a  adspr.jsn
+0d4ed22c7eb1866f43032e5cf6ac2f196f02c3dc8220c49124d8e2c52bea559f63fa505e7fa60aba2c04ab6b1f08528306d60a31bd5426e16df3eb3e86f9a483  adspua.jsn
+a1326cfef64fc84269ddfd75abf44bda6952f22a0e5f3aa30c876b113711b677d8a0c03a8847c00115dc121c0d272f22120be4bbc6680c6dc31c5859e2e830be  amss20.bin
+55c02f22af25745b63ccf2586aebdbae931121f0bf044e244c0dcbbfb2739a30cef798c8e8cd380f9af7250d9d0e0316790c9305124a405a38cabe3b5be1a8a5  bdwlan.elf
+76756ad9764b072060bc6209c1651ea3faae5af829cefd9ee5a0d1c5241484e1248fea2b4316aad613c24992c077dee92e57dc91b98069cde585dcd488fe6983  cdsp.mbn
+30faec8d016ce554c5f576ffd94c8d4d320d0481cc4eef736f061307349f8fabedf5833b958e9cae86345450dfe84cf56ef935615926e728f527c54d2ec363d0  cdspr.jsn
+9ca15af8215c982aa251e7b2e7193e455b20ea6e6ef5d37426f42ee13801e049e9ef9ebcfd6295bd8c70b908429bdb08a5dce287c03b31f2c9029e6c44b4a818  cs35l41-spk-prot.wmfw
+033d5189a250d5e1e9add93433492e229d151baf9f0fb20a5499515921e325056a50a330fc5a96b9136180f45226ffbc6e1d620edd53b062763981b2e039a339  cs35l41-spk-prot-bottom.bin
+90afdc7619f998c657cfcbf2fa9520177d957ad996447257e47a28ef4a3b70b257cf30d99e4d029f419669b54db966b6597d02ded15dcc849ca847bd41afb89f  cs35l41-spk-prot-top.bin
+f0a47ab9ee674c490e971ec21bbe6cc5aff15841048012abcc6653c5434554d1c0a342a7eef7797867f3deb73ce3b4110ffefd60a2a83645f2524a2aadfc86e7  hexagonfs.tar.gz
+39710cde616f600b2a282d66c57b83f4a12bcefd41792cbd79961d4d518f9c40236fe198f038c97aad4be8d23b1617103cf7801042eca8e740bfbb2555ea6970  m3.bin
+501ce80ece02b1fdf1ba2012ea8b57fe609832f983f3391aea6ff52c31bd5bd1fdccbe2b97a0ce8a3200788f66f8039ea4b6aac1d6b1afe85943fe804946b0bf  modem.mbn
+7c2a9ed96930e286800d0f1adeb49f033d24c2a93350a24e83484b291f58aa4acd71459c887cb30f56f47777289320a71a973be8156605faa52ab658ea0f77a7  modem_pr.tar.gz
+841e6538588b47e5497eb145e4e41e6698da55cabdd022390d5c4415fea8bce3f978fdef7fe3cace06b07f6ebcf91847f48a2e9c191d624853710dcb09160839  modemr.jsn
+70eb35f2143de9df1fa051ef80f7e6a48202fa01d67fff624689646fd21dc713f14af3e218fedba926e13e92cc8c4e6084186ad25184421e9f436dbbcbbe2b2a  regdb.bin
+9ad0ab64a99bec25d9d6cd572d259bba314ab8299ccf6b604822360f830d6ea981445c764779f2d7f109b69d8efe3eae4ef6f8d15ee773b87fb4fffbad5f6af7  slpi.mbn
+99ea91e949f1b57a8d3ce32fdcbb22b6cff1a35e8435ca52097080aa52f9a575399481b28a940ea0b5ff0899c87d19bfbe95404076ff579b7a7db3ffbd8a493a  slpir.jsn
+bfa63a3b6e06fb16f9ccf01cd6b797e6b276b7e5dfc8939a9822b0e49fd1118c7bd3e37d765c158432c4974b0c2c06182e3106d644e41d6ea9409e791fe2fbe5  slpius.jsn
+"

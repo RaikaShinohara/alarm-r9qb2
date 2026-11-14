@@ -1,0 +1,14 @@
+# Static unit (multi-user.target.wants symlink in the package): on the first
+# boot of a fresh install, read the real Wi-Fi/Bluetooth addresses from efs,
+# put them in the boot image and reboot once, before the login screen (or
+# Steam's setup would bind the Wi-Fi network to the temporary MAC).
+# Package upgrades run r9q-macs directly (no reboot there).
+[Unit]
+Description=Read the Wi-Fi and Bluetooth addresses from efs
+ConditionPathExists=!/etc/r9q/macs
+After=local-fs.target
+Before=display-manager.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/r9q/r9q-macs --reboot

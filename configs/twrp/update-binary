@@ -1,0 +1,103 @@
+#!/sbin/sh
+# TWRP installer for Arch Linux ARM on the Samsung Galaxy S21 FE (SM-G990B2,
+# r9q), made by scripts/make-twrp-zip.sh. Same steps as
+# scripts/flash-twrp-adb.sh, run inside TWRP:
+#   userdata    <- rootfs.img.gz (ext4 root; ERASES internal storage and data)
+#   boot        <- boot.img          vendor_boot <- vendor_boot.img
+#   dtbo        <- 4 KiB of zeros (the ABL then skips Samsung's DT overlays)
+#   param/misc  <- "boot recovery" flags cleared
+# Everything is checked (model, sizes, SHA-256) before anything is written.
+# The zip must not be on internal storage (that IS userdata): use a USB-OTG
+# drive or `adb sideload`.
+OUTFD=$2
+ZIP=$3
+
+ui() {
+	echo "ui_print $*" >> /proc/self/fd/"$OUTFD"
+	echo "ui_print" >> /proc/self/fd/"$OUTFD"
+}
+WROTE=0
+abort() {
+	ui "ERROR: $*"
+	[ "$WROTE" = 1 ] || ui "Nothing has been written to the phone."
+	exit 1
+}
+# R9Q_TEST_BLK: test mode (scripts/test-twrp-installer.sh), "partitions" are files
+BLK=${R9Q_TEST_BLK:-/dev/block/by-name}
+part() { echo "$BLK/$1"; }
+isblk() { if [ -n "$R9Q_TEST_BLK" ]; then [ -f "$1" ]; else [ -b "$1" ]; fi; }
+
+ui "Galaxy S21 FE (r9q) - Arch Linux ARM"
+
+# 1. right phone, right place
+model=$(getprop ro.boot.em.model)
+[ "$model" = SM-G990B2 ] || abort "this ZIP is only for the SM-G990B2 (this one is '$model')"
+real=$(readlink -f "$ZIP" 2>/dev/null || echo "$ZIP")
+case "$real" in
+/data/* | /sdcard/* | /storage/emulated/* | /mnt/runtime/*)
+	abort "the ZIP is in internal storage, which is exactly what gets erased. Copy it to a USB drive (USB-OTG) or use adb sideload."
+	;;
+esac
+
+# 2. what is in the zip
+unzip -p "$ZIP" manifest.txt > /tmp/r9q-manifest 2>/dev/null || abort "manifest.txt not found in the ZIP"
+. /tmp/r9q-manifest
+[ -n "$IMG_SIZE" ] && [ -n "$IMG_SHA256" ] && [ -n "$GZ_SHA256" ] || abort "manifest.txt is incomplete"
+ui "Edition: $EDITION   Build: $BUILD"
+ui "Kernel $KERNEL, $SYSTEM_SIZE"
+
+for p in userdata boot vendor_boot dtbo param misc; do
+	isblk "$(part $p)" || abort "partition $p does not exist"
+done
+data_size=$(blockdev --getsize64 "$(part userdata)")
+[ "$IMG_SIZE" -le "$data_size" ] || abort "the image ($IMG_SIZE) does not fit in userdata ($data_size)"
+
+# 3. check everything before writing anything
+ui "Checking boot and vendor_boot..."
+for f in boot.img vendor_boot.img; do
+	unzip -o -q -d /tmp/r9q "$ZIP" "$f" || abort "could not extract $f"
+done
+[ "$(sha256sum /tmp/r9q/boot.img | cut -d' ' -f1)" = "$BOOT_SHA256" ] || abort "boot.img does not match its SHA-256"
+[ "$(sha256sum /tmp/r9q/vendor_boot.img | cut -d' ' -f1)" = "$VBOOT_SHA256" ] || abort "vendor_boot.img does not match its SHA-256"
+for f in boot vendor_boot; do
+	fs=$(stat -c %s /tmp/r9q/$f.img)
+	ps=$(blockdev --getsize64 "$(part $f)")
+	[ "$fs" -le "$ps" ] || abort "$f.img does not fit in its partition"
+done
+ui "Checking the system (a few minutes)..."
+got=$(unzip -p "$ZIP" rootfs.img.gz | sha256sum | cut -d' ' -f1)
+[ "$got" = "$GZ_SHA256" ] || abort "rootfs.img.gz is damaged (SHA-256 differs). Copy the ZIP again."
+
+# 4. write the system to userdata
+ui "Unmounting the internal storage..."
+for m in /sdcard /data/media /data; do
+	umount "$m" 2>/dev/null || umount -l "$m" 2>/dev/null
+done
+[ -n "$R9Q_TEST_BLK" ] || ! grep -q " /data " /proc/mounts || abort "could not unmount /data"
+
+ui "Writing the system to userdata (several minutes, do not reboot)..."
+WROTE=1
+set -o pipefail
+if ! unzip -p "$ZIP" rootfs.img.gz | unpigz -c | dd of="$(part userdata)" bs=4194304 2>/tmp/r9q-dd.log; then
+	abort "writing userdata failed ($(tail -n1 /tmp/r9q-dd.log)). The phone will not boot Linux until it is reinstalled."
+fi
+sync
+ui "Verifying what was written..."
+got=$(head -c "$IMG_SIZE" "$(part userdata)" | sha256sum | cut -d' ' -f1)
+[ "$got" = "$IMG_SHA256" ] || abort "verifying userdata failed. Install again."
+
+# 5. boot images, overlays off, recovery flags cleared
+ui "Writing boot and vendor_boot..."
+dd if=/tmp/r9q/boot.img of="$(part boot)" bs=1048576 2>/dev/null || abort "writing boot failed"
+dd if=/tmp/r9q/vendor_boot.img of="$(part vendor_boot)" bs=1048576 2>/dev/null || abort "writing vendor_boot failed"
+dd if=/dev/zero of="$(part dtbo)" bs=4096 count=1 2>/dev/null
+dd if=/dev/zero of="$(part param)" bs=4 count=1 conv=notrunc 2>/dev/null
+dd if=/dev/zero of="$(part misc)" bs=4096 count=8 2>/dev/null
+sync
+rm -rf /tmp/r9q /tmp/r9q-manifest /tmp/r9q-dd.log
+
+ui "Done."
+ui "Reboot to System. On the first boot the phone reboots"
+ui "once by itself (it applies the real Wi-Fi and Bluetooth MACs)."
+ui "Do not press any button until the login screen shows."
+exit 0

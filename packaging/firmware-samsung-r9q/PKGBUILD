@@ -1,0 +1,58 @@
+# Maintainer: RaikaShinohara <321751277+RaikaShinohara@users.noreply.github.com>
+# Galaxy S21 FE firmware: DSPs (ADSP/CDSP/SLPI/modem) and their configs,
+# Samsung Wi-Fi (WLAN.HSP.2.0 + board file), Adreno 660 zap shader plus the
+# generic a660 SQE/GMU, CS35L41 speaker protection and the SLPI hexagonfs.
+# Same files as the postmarketOS firmware-samsung-r9q-* packages (repacked by
+# build-packages.sh), plus Samsung's Bluetooth patch + NVM. Deliberately does NOT
+# pull linux-firmware: its ath11k board-2.bin breaks Wi-Fi (docs/porting-log.md row 15).
+pkgname=firmware-samsung-r9q
+pkgver=1
+pkgrel=6
+pkgdesc="Firmware for the Samsung Galaxy S21 FE (SM8350)"
+arch=('aarch64')
+url="https://postmarketos.org"
+license=('LicenseRef-proprietary')
+options=('!strip' '!debug')
+_apks=(
+	firmware-samsung-r9q-adreno-1-r5.apk
+	firmware-samsung-r9q-adsp-1-r5.apk
+	firmware-samsung-r9q-audio-1-r5.apk
+	firmware-samsung-r9q-cdsp-1-r5.apk
+	firmware-samsung-r9q-hexagonfs-1-r5.apk
+	firmware-samsung-r9q-modem-1-r5.apk
+	firmware-samsung-r9q-slpi-1-r5.apk
+	firmware-samsung-r9q-wifi-1-r5.apk
+	firmware-qcom-adreno-a660.apk
+)
+# Bluetooth (QCA6490): Samsung's rampatch and NVM from the stock vendor
+# partition (fw/vendor/firmware, staged by build-packages.sh)
+_bt=(hpbtfw21.tlv hpnv21g.baa)
+source=("${_apks[@]}" "${_bt[@]}")
+noextract=("${_apks[@]}")
+sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP'
+	'1fba72a17abc32f22a2aa7571c507f836a0093de54a8a7d9c2256729a70d76e6'
+	'dbc57ebf8918d07eafe318e6ad6c6c18d1ae592d768d9acc663b65f2759c6e7d')
+
+package() {
+	local a
+	for a in "${_apks[@]}"; do
+		tar -xzf "$a" -C "$pkgdir" usr 2>/dev/null || tar -xzf "$a" -C "$pkgdir" 2>/dev/null || true
+	done
+	rm -f "$pkgdir"/.PKGINFO "$pkgdir"/.SIGN.* "$pkgdir"/.pre-* "$pkgdir"/.post-*
+	# only the a660 files from the generic Adreno package
+	find "$pkgdir"/usr/lib/firmware/qcom -maxdepth 1 -type f ! -name 'a660_*' -delete
+	# Bluetooth: with the ROM firmware alone the chip slows down encryption
+	# (classic HID channels get refused) and crashes once a DualShock 4 sends
+	# data (hardware error 0x8c); Samsung's patch + NVM fixes it (docs/porting-log.md,
+	# Arch diary). In updates/qca: searched first by the kernel and outside the
+	# NoExtract that keeps linux-firmware's qca/ files out (pacman.conf).
+	install -Dm644 hpbtfw21.tlv "$pkgdir"/usr/lib/firmware/updates/qca/hpbtfw21.tlv
+	install -Dm644 hpnv21g.baa "$pkgdir"/usr/lib/firmware/updates/qca/hpnv21g.bin
+	find "$pkgdir" -type d -exec chmod 0755 {} +
+	find "$pkgdir" -type f -exec chmod 0644 {} +
+	test -s "$pkgdir"/usr/lib/firmware/qcom/a660_sqe.fw* &&
+	test -s "$pkgdir"/usr/lib/firmware/qcom/sm8350/samsung/r9q/adsp.mbn &&
+	test -s "$pkgdir"/usr/lib/firmware/ath11k/WCN6855/hw2.1/board.bin &&
+	test -d "$pkgdir"/usr/share/qcom/sm8350/Samsung/r9q/sensors &&
+	test -s "$pkgdir"/usr/lib/firmware/updates/qca/hpbtfw21.tlv
+}

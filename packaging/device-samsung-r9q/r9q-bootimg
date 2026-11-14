@@ -1,0 +1,98 @@
+#!/bin/sh
+# Make the Galaxy S21 FE boot what is installed. Called by the pacman hook
+# after mkinitcpio (and by r9q-macs). Two modes, BOOT_MODE in
+# /etc/r9q/bootimg.conf:
+#
+#  abl  (default, Linux alone on the phone): /boot/boot.img and
+#       /boot/vendor_boot.img for Samsung's ABL (boot image header v3: Image.gz
+#       in boot, DTB + initramfs + cmdline in vendor_boot); --flash writes them
+#       to their partitions (only on the S21 FE itself).
+#  uefi (dual boot with Android): boot, vendor_boot and dtbo are Android's and
+#       are never written. The kernel (uncompressed: the EFI stub needs a PE
+#       file), the initramfs and the DTB go to $ESP/arch/, with the
+#       systemd-boot entry $ESP/loader/entries/arch.conf; the ESP (PARTLABEL=esp)
+#       is mounted on /efi. R9Q_ESP overrides the path (image build: a staging
+#       directory the TWRP zip copies to the ESP).
+set -eu
+BOOT_MODE=abl
+. /etc/r9q/bootimg.conf
+
+kver=
+for d in /usr/lib/modules/*/; do
+	[ "$(cat "$d/pkgbase" 2>/dev/null)" = linux-samsung-r9q ] && kver=$(basename "$d")
+done
+[ -n "$kver" ] || { echo "r9q-bootimg: linux-samsung-r9q not installed"; exit 0; }
+
+KERNEL=/boot/vmlinuz-linux-samsung-r9q
+INITRD=/boot/initramfs-linux-samsung-r9q.img
+DTB=/usr/lib/modules/$kver/dtbs/qcom/sm8350-samsung-r9q.dtb
+for f in "$KERNEL" "$INITRD" "$DTB"; do
+	[ -s "$f" ] || { echo "r9q-bootimg: missing $f"; exit 1; }
+done
+on_phone() { { tr '\0' '\n' < /proc/device-tree/compatible; } 2>/dev/null | grep -qx 'samsung,r9q'; }
+
+tmpd=$(mktemp -d)
+trap 'rm -rf "$tmpd"' EXIT
+
+# Samsung's real Wi-Fi/Bluetooth addresses (r9q-macs, from efs) into a copy of
+# the device tree: local-mac-address for ath11k, local-bd-address (least
+# significant byte first) for the QCA Bluetooth
+if [ -r /etc/r9q/macs ]; then
+	WIFI_MAC= BT_ADDR=
+	. /etc/r9q/macs
+	cp "$DTB" "$tmpd/r9q.dtb"
+	DTB=$tmpd/r9q.dtb
+	if [ -n "$WIFI_MAC" ]; then
+		fdtput -t bx "$DTB" /soc@0/pcie@1c00000/pcie@0/wifi@0 local-mac-address \
+			$(echo "$WIFI_MAC" | tr ':' ' ') || echo "r9q-bootimg: could not set the Wi-Fi MAC"
+	fi
+	if [ -n "$BT_ADDR" ]; then
+		fdtput -t bx "$DTB" /soc@0/geniqup@8c0000/serial@890000/bluetooth local-bd-address \
+			$(echo "$BT_ADDR" | tr ':' '\n' | tac | tr '\n' ' ') || echo "r9q-bootimg: could not set the Bluetooth address"
+	fi
+fi
+
+if [ "$BOOT_MODE" = uefi ]; then
+	ESP=${R9Q_ESP:-/efi}
+	if [ -z "${R9Q_ESP:-}" ] && ! mountpoint -q "$ESP"; then
+		mount "$ESP" 2>/dev/null || { echo "r9q-bootimg: the ESP is not mounted on $ESP"; exit 1; }
+	fi
+	mkdir -p "$ESP/arch" "$ESP/loader/entries" "$ESP/EFI/BOOT"
+	# write each file next to the old one and rename: never half a kernel
+	put() { cp "$1" "$2.new" && sync && mv -f "$2.new" "$2"; }
+	gzip -dc "$KERNEL" > "$tmpd/Image" 2>/dev/null || cp "$KERNEL" "$tmpd/Image"
+	[ "$(head -c 2 "$tmpd/Image")" = MZ ] || { echo "r9q-bootimg: the kernel is not an EFI (PE) Image"; exit 1; }
+	put "$tmpd/Image" "$ESP/arch/Image"
+	put "$INITRD" "$ESP/arch/initramfs.img"
+	put "$DTB" "$ESP/arch/r9q.dtb"
+	printf 'title      Arch Linux ARM\nsort-key   10-arch\nlinux      /arch/Image\ninitrd     /arch/initramfs.img\ndevicetree /arch/r9q.dtb\noptions    %s\n' \
+		"$CMDLINE" > "$tmpd/arch.conf"
+	put "$tmpd/arch.conf" "$ESP/loader/entries/arch.conf"
+	# systemd-boot itself, when the systemd package brought a different one
+	sdb=/usr/lib/systemd/boot/efi/systemd-bootaa64.efi
+	if [ -s "$sdb" ] && ! cmp -s "$sdb" "$ESP/EFI/BOOT/BOOTAA64.EFI"; then
+		put "$sdb" "$ESP/EFI/BOOT/BOOTAA64.EFI"
+		echo "r9q-bootimg: systemd-boot updated on the ESP"
+	fi
+	[ -s "$ESP/loader/loader.conf" ] || printf 'timeout 5\ndefault arch.conf\nconsole-mode keep\n' > "$ESP/loader/loader.conf"
+	sync
+	echo "r9q-bootimg: kernel $kver, initramfs and DTB on the ESP ($ESP)"
+	exit 0
+fi
+
+mkbootimg --header_version 3 --pagesize 4096 --kernel "$KERNEL" \
+	--os_version 11.0.0 --os_patch_level 2024-06 -o /boot/boot.img.new
+mkbootimg --header_version 3 --pagesize 4096 --base 0x00000000 \
+	--kernel_offset 0x00008000 --ramdisk_offset 0x02000000 \
+	--tags_offset 0x01e00000 --dtb_offset 0x01f00000 --board SRPVC21A007 \
+	--dtb "$DTB" --vendor_ramdisk "$INITRD" --vendor_cmdline "$CMDLINE" \
+	--vendor_boot /boot/vendor_boot.img.new
+mv /boot/boot.img.new /boot/boot.img
+mv /boot/vendor_boot.img.new /boot/vendor_boot.img
+echo "r9q-bootimg: built boot.img and vendor_boot.img for $kver"
+
+[ "${1:-}" = --flash ] || exit 0
+on_phone || { echo "r9q-bootimg: not running on the Galaxy S21 FE, not flashing"; exit 0; }
+dd if=/boot/boot.img of=/dev/disk/by-partlabel/boot bs=4M conv=fsync status=none
+dd if=/boot/vendor_boot.img of=/dev/disk/by-partlabel/vendor_boot bs=4M conv=fsync status=none
+echo "r9q-bootimg: flashed boot and vendor_boot"

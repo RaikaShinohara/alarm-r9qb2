@@ -1,0 +1,8 @@
+[Unit]
+Description=Save the RTC offset after NTP synchronization
+
+[Service]
+Type=oneshot
+# stays active so the PathExists= unit does not trigger it again
+RemainAfterExit=yes
+ExecStart=/usr/lib/r9q/r9q-clock save

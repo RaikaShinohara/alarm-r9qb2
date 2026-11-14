@@ -1,0 +1,11 @@
+# Static unit: enabled by the multi-user.target.wants symlink in the package.
+# Every boot starts in game mode (as ArmadaOS), whatever was chosen last.
+[Unit]
+Description=Start the next login session in game mode
+Before=display-manager.service
+After=local-fs.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/r9q/r9q-session-set reset

@@ -1,0 +1,6 @@
+# postmarketOS loads module-role-ducking with trigger_roles=event: while an
+# "event" stream plays, every other stream is ducked. Plasma's volume change
+# feedback is such a stream, so each press of the volume keys silenced the
+# music or video for a moment. Turn the feedback sound off by default.
+[General]
+AudioFeedback=false

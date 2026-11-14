@@ -1,0 +1,10 @@
+# Started by 82-r9q-bluetooth.rules when hci0 appears: give the QCA6490 its
+# stable address if the patched firmware left it unconfigured, unblock rfkill
+# and power it on (/usr/lib/r9q/r9q-bt-power).
+[Unit]
+Description=Configure and power on the Bluetooth controller
+After=bluetooth.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/r9q/r9q-bt-power

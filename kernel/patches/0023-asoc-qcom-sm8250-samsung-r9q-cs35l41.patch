@@ -1,0 +1,111 @@
+From: RaikaShinohara <321751277+RaikaShinohara@users.noreply.github.com>
+Subject: [PATCH] ASoC: qcom: sm8250: Samsung Galaxy S21 FE (CS35L41 on primary MI2S)
+
+The Galaxy S21 FE (SM8350, APR audio) has two Cirrus CS35L41 speaker
+amplifiers on the primary MI2S. Each needs the bit clock as its PLL
+reference and its own I2S slot, which the generic startup does not set.
+Add a samsung,r9q-sndcard compatible that does, and skip the headset
+jack on that link.
+
+---
+--- a/sound/soc/qcom/sm8250.c
++++ b/sound/soc/qcom/sm8250.c
+@@ -11,6 +11,7 @@
+ #include <linux/soundwire/sdw.h>
+ #include <sound/jack.h>
+ #include <linux/input-event-codes.h>
++#include <sound/cs35l41.h>
+ #include "qdsp6/q6afe.h"
+ #include "common.h"
+ #include "usb_offload_utils.h"
+@@ -26,6 +27,11 @@
+ 	bool usb_offload_jack_setup;
+ 	struct snd_soc_jack dp_jack;
+ 	bool jack_setup;
++	/*
++	 * Cirrus CS35L41 amplifiers on PRIMARY_MI2S_RX (Samsung Galaxy S21
++	 * FE): each one clocks its PLL from SCLK and takes its own I2S slot.
++	 */
++	bool cs35l41_pri_mi2s;
+ };
+ 
+ static int sm8250_snd_init(struct snd_soc_pcm_runtime *rtd)
+@@ -34,6 +40,11 @@
+ 	struct snd_soc_dai *cpu_dai = snd_soc_rtd_to_cpu(rtd, 0);
+ 
+ 	switch (cpu_dai->id) {
++	case PRIMARY_MI2S_RX:
++		/* speaker amplifiers only, no headset codec behind this link */
++		if (data->cs35l41_pri_mi2s)
++			return 0;
++		return qcom_snd_wcd_jack_setup(rtd, &data->jack, &data->jack_setup);
+ 	case DISPLAY_PORT_RX:
+ 		return qcom_snd_dp_jack_setup(rtd, &data->dp_jack, 0);
+ 	case USB_RX:
+@@ -71,8 +82,37 @@
+ 	return 0;
+ }
+ 
++/*
++ * Clock each CS35L41 from the MI2S bit clock and give the n-th amplifier
++ * of the link the n-th I2S slot (left, right).
++ */
++static void sm8250_cs35l41_setup(struct snd_soc_pcm_runtime *rtd,
++				 unsigned int codec_dai_fmt)
++{
++	struct snd_soc_dai *codec_dai;
++	unsigned int slot;
++	int i, ret;
++
++	for_each_rtd_codec_dais(rtd, i, codec_dai) {
++		slot = i;
++		snd_soc_dai_set_fmt(codec_dai, codec_dai_fmt);
++		ret = snd_soc_component_set_sysclk(codec_dai->component,
++						   CS35L41_CLKID_SCLK, 0,
++						   MI2S_BCLK_RATE,
++						   SND_SOC_CLOCK_IN);
++		if (ret)
++			dev_err(codec_dai->dev, "SCLK as PLL reference: %d\n", ret);
++		snd_soc_dai_set_sysclk(codec_dai, CS35L41_CLKID_SCLK,
++				       MI2S_BCLK_RATE, SND_SOC_CLOCK_IN);
++		ret = snd_soc_dai_set_channel_map(codec_dai, 0, NULL, 1, &slot);
++		if (ret)
++			dev_err(codec_dai->dev, "RX slot %u: %d\n", slot, ret);
++	}
++}
++
+ static int sm8250_snd_startup(struct snd_pcm_substream *substream)
+ {
++	struct sm8250_snd_data *data = snd_soc_card_get_drvdata(snd_soc_substream_to_rtd(substream)->card);
+ 	unsigned int fmt = SND_SOC_DAIFMT_BP_FP;
+ 	unsigned int codec_dai_fmt = SND_SOC_DAIFMT_BC_FC;
+ 	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
+@@ -86,7 +126,10 @@
+ 			Q6AFE_LPASS_CLK_ID_PRI_MI2S_IBIT,
+ 			MI2S_BCLK_RATE, SNDRV_PCM_STREAM_PLAYBACK);
+ 		snd_soc_dai_set_fmt(cpu_dai, fmt);
+-		snd_soc_dai_set_fmt(codec_dai, codec_dai_fmt);
++		if (data->cs35l41_pri_mi2s)
++			sm8250_cs35l41_setup(rtd, codec_dai_fmt);
++		else
++			snd_soc_dai_set_fmt(codec_dai, codec_dai_fmt);
+ 		break;
+ 	case SECONDARY_MI2S_RX:
+ 		codec_dai_fmt |= SND_SOC_DAIFMT_NB_NF | SND_SOC_DAIFMT_I2S;
+@@ -184,6 +227,8 @@
+ 		return ret;
+ 
+ 	card->driver_name = of_device_get_match_data(dev);
++	data->cs35l41_pri_mi2s = of_device_is_compatible(dev->of_node,
++							 "samsung,r9q-sndcard");
+ 	sm8250_add_be_ops(card);
+ 	return devm_snd_soc_register_card(dev, card);
+ }
+@@ -195,6 +240,7 @@
+ 	{ .compatible = "qcom,qrb4210-rb2-sndcard", .data = "sm4250" },
+ 	{ .compatible = "qcom,qrb5165-rb5-sndcard", .data = "sm8250" },
+ 	{ .compatible = "qcom,sm8250-sndcard", .data = "sm8250" },
++	{ .compatible = "samsung,r9q-sndcard", .data = "sm8350" },
+ 	{}
+ };
+ 

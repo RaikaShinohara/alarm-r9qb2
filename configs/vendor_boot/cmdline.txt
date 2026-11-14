@@ -1,0 +1,1 @@
+root=PARTLABEL=userdata rw rootwait clk_ignore_unused pd_ignore_unused regulator_ignore_unused panic=10 fbcon=font:TER16x32 panel_samsung_ea8082.refresh_rate=120 deferred_probe_timeout=60

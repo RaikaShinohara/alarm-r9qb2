@@ -1,0 +1,19 @@
+_autologin_user() {
+	# Plasma Mobile logs in automatically as the phone's user (uid 1000); the
+	# image build writes this file itself
+	conf=/etc/plasmalogin.conf.d/10-r9q-autologin.conf
+	[ -e "$conf" ] && return 0
+	user=$(getent passwd 1000 | cut -d: -f1)
+	[ -n "$user" ] || { echo ">>> no user with uid 1000: set User= in $conf"; return 0; }
+	mkdir -p /etc/plasmalogin.conf.d
+	printf '[Autologin]\nUser=%s\n' "$user" > "$conf"
+	echo ">>> Plasma Mobile: automatic login as $user ($conf)"
+}
+
+post_install() {
+	_autologin_user
+}
+
+post_upgrade() {
+	_autologin_user
+}

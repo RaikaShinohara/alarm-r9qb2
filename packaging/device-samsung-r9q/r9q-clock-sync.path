@@ -1,0 +1,8 @@
+# Static unit: enabled by the multi-user.target.wants symlink in the package.
+# Save the RTC offset once NTP (systemd-timesyncd) has synchronized the clock.
+[Unit]
+Description=Save the RTC offset after NTP synchronization
+
+[Path]
+PathExists=/run/systemd/timesync/synchronized
+Unit=r9q-clock-sync.service

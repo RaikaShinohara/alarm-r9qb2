@@ -1,0 +1,25 @@
+# Maintainer: RaikaShinohara <321751277+RaikaShinohara@users.noreply.github.com>
+# Qualcomm IPC Router userspace library (libqrtr), needed by rmtfs and
+# tqftpserv. The name service runs in the kernel, qrtr-ns is not enabled.
+pkgname=qrtr
+pkgver=1.2
+pkgrel=1
+pkgdesc="Qualcomm IPC Router (QRTR) library and tools"
+arch=('aarch64')
+url="https://github.com/linux-msm/qrtr"
+license=('BSD-3-Clause')
+depends=('glibc')
+makedepends=('meson' 'linux-api-headers')
+source=("$pkgname-$pkgver.tar.gz::https://github.com/linux-msm/qrtr/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+	arch-meson "$pkgname-$pkgver" build -Dsystemd-service=disabled 2>/dev/null ||
+		arch-meson "$pkgname-$pkgver" build
+	meson compile -C build
+}
+
+package() {
+	DESTDIR="$pkgdir" meson install -C build
+	install -Dm644 "$pkgname-$pkgver"/LICENSE -t "$pkgdir"/usr/share/licenses/$pkgname/ 2>/dev/null || true
+}

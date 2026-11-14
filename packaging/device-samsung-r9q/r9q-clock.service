@@ -1,0 +1,17 @@
+# Started by 83-r9q-clock.rules when rtc0 appears: rtc-pm8xxx is a module and
+# the kernel resets the clock from the RTC (1970) when it registers, so this
+# must run after that, not at a fixed point of the boot.
+[Unit]
+Description=Set the clock from the PMIC RTC and the saved offset
+Documentation=file:///usr/lib/r9q/r9q-clock
+DefaultDependencies=no
+After=local-fs.target dev-rtc0.device
+Before=time-set.target systemd-timesyncd.service shutdown.target
+Wants=time-set.target
+Conflicts=shutdown.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/r9q/r9q-clock restore
+ExecStop=/usr/lib/r9q/r9q-clock save

@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=r9q dock
+Comment=Desktop panel on external screens in Plasma Mobile
+Exec=/usr/lib/r9q/r9q-dock
+NoDisplay=true
+X-KDE-autostart-phase=2

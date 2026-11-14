@@ -1,0 +1,13 @@
+[Unit]
+Description=DHCP for the USB network (gives the PC 172.16.42.2)
+After=r9q-usb-gadget.service
+Requires=r9q-usb-gadget.service
+
+[Service]
+# DHCP only (port=0: no DNS), bound to the gadget interface
+ExecStart=/usr/bin/dnsmasq --keep-in-foreground --conf-file=/dev/null --port=0 --interface=usb0 --bind-dynamic --dhcp-range=172.16.42.2,172.16.42.2,255.255.255.0,12h --dhcp-option=3 --dhcp-option=6 --dhcp-leasefile=/run/r9q-usb-dhcp.leases
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

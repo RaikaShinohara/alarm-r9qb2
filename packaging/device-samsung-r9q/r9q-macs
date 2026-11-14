@@ -1,0 +1,51 @@
+#!/bin/sh
+# Samsung's real Wi-Fi and Bluetooth addresses, read from the efs partition
+# (mounted read-only, without journal replay) into /etc/r9q/macs. r9q-bootimg
+# then puts them in the device tree (local-mac-address for ath11k,
+# local-bd-address for the QCA Bluetooth) and the next boot uses them.
+# Without them the Wi-Fi firmware makes up a new 00:03:7f:12:xx:xx MAC on every
+# boot (Steam binds saved networks to it, so they stop matching after a
+# reboot) and the patched Bluetooth comes up without an address.
+# Usage (root): r9q-macs [--force] [--reboot]
+#   --reboot: reboot once the addresses are in the boot image (first boot of a
+#             fresh install, before the login screen: otherwise Steam's setup
+#             would bind the Wi-Fi network to the temporary MAC)
+set -eu
+out=/etc/r9q/macs
+force=0 reboot=0
+for a in "$@"; do
+	case "$a" in
+	--force) force=1 ;;
+	--reboot) reboot=1 ;;
+	esac
+done
+[ "$force" = 1 ] || [ ! -s "$out" ] || exit 0
+if ! { tr '\0' '\n' < /proc/device-tree/compatible; } 2>/dev/null | grep -qx 'samsung,r9q'; then
+	echo "r9q-macs: not running on the Galaxy S21 FE"
+	exit 0
+fi
+efs=/dev/disk/by-partlabel/efs
+[ -b "$efs" ] || { echo "r9q-macs: no efs partition"; exit 0; }
+
+mnt=$(mktemp -d)
+mount -t ext4 -o ro,noload,nodev,nosuid,noexec "$efs" "$mnt"
+wifi=$(head -n1 "$mnt/wifi/.mac.info" 2>/dev/null | tr -d '\r\n ' | tr 'a-f' 'A-F' || true)
+bt=$(head -n1 "$mnt/bluetooth/bt_addr" 2>/dev/null | tr -d '\r\n ' | tr 'a-f' 'A-F' || true)
+umount "$mnt"
+rmdir "$mnt"
+
+valid() { printf '%s' "$1" | grep -qE '^([0-9A-F]{2}:){5}[0-9A-F]{2}$' && [ "$1" != 00:00:00:00:00:00 ]; }
+valid "$wifi" || wifi=
+valid "$bt" || bt=
+[ -n "$wifi$bt" ] || { echo "r9q-macs: no valid address in efs"; exit 0; }
+
+mkdir -p "${out%/*}"
+printf '# Samsung efs addresses (r9q-macs), put in the device tree by r9q-bootimg\nWIFI_MAC=%s\nBT_ADDR=%s\n' \
+	"$wifi" "$bt" > "$out.new"
+mv "$out.new" "$out"
+echo "r9q-macs: Wi-Fi $wifi, Bluetooth $bt (from the next boot)"
+/usr/lib/r9q/r9q-bootimg --flash
+if [ "$reboot" = 1 ]; then
+	echo "r9q-macs: rebooting once to use them"
+	systemctl --no-block reboot
+fi

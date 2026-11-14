@@ -1,0 +1,407 @@
+--- a/drivers/gpu/drm/panel/Kconfig
++++ b/drivers/gpu/drm/panel/Kconfig
+@@ -878,6 +878,20 @@
+ 	  DB7430 DPI display controller used in such devices as the
+ 	  LMS397KF04 480x800 DPI panel.
+ 
++config DRM_PANEL_SAMSUNG_EA8082
++	tristate "Samsung EA8082 AMB641ZR01 DSI command mode panel"
++	depends on GPIOLIB
++	depends on OF
++	depends on DRM_MIPI_DSI
++	depends on BACKLIGHT_CLASS_DEVICE
++	select DRM_DISPLAY_HELPER
++	select DRM_DISPLAY_DSC_HELPER
++	help
++	  Say Y or M here if you want to enable support for the Samsung
++	  AMB641ZR01 6.4" FHD+ (1080x2340) AMOLED panel with the EA8082
++	  DDIC, found in the Samsung Galaxy S21 FE (SM-G990B2). It is a
++	  DSI command mode panel using Display Stream Compression.
++
+ config DRM_PANEL_SAMSUNG_LD9040
+ 	tristate "Samsung LD9040 RGB/SPI panel"
+ 	depends on OF && SPI
+--- a/drivers/gpu/drm/panel/Makefile
++++ b/drivers/gpu/drm/panel/Makefile
+@@ -84,6 +84,7 @@
+ obj-$(CONFIG_DRM_PANEL_SAMSUNG_AMS639RQ08) += panel-samsung-ams639rq08.o
+ obj-$(CONFIG_DRM_PANEL_SAMSUNG_ATNA33XC20) += panel-samsung-atna33xc20.o
+ obj-$(CONFIG_DRM_PANEL_SAMSUNG_DB7430) += panel-samsung-db7430.o
++obj-$(CONFIG_DRM_PANEL_SAMSUNG_EA8082) += panel-samsung-ea8082.o
+ obj-$(CONFIG_DRM_PANEL_SAMSUNG_LD9040) += panel-samsung-ld9040.o
+ obj-$(CONFIG_DRM_PANEL_SAMSUNG_LTL106HL02) += panel-samsung-ltl106hl02.o
+ obj-$(CONFIG_DRM_PANEL_SAMSUNG_S6D16D0) += panel-samsung-s6d16d0.o
+--- /dev/null
++++ b/drivers/gpu/drm/panel/panel-samsung-ea8082.c
+@@ -0,0 +1,371 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Samsung EA8082 DDI with the AMB641ZR01 6.4" FHD+ AMOLED (Galaxy S21 FE, r9q).
++ *
++ * Command mode, 4 lanes, DSC 1.1 (8 bpc, 8 bpp, two 540x30 slices).
++ * The initialisation sequence comes from the vendor device tree
++ * (ss_dsi_panel_EA8082_AMB641ZR01_FHD, timings "fhd60hs" / "fhd120hs": they
++ * only differ in register 0x60 and the vertical front porch).
++ *
++ * A panel driver cannot see which mode the CRTC picked, so the refresh rate
++ * is chosen with the refresh_rate module parameter (60 or 120).
++ */
++
++#include <linux/backlight.h>
++#include <linux/delay.h>
++#include <linux/gpio/consumer.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/regulator/consumer.h>
++
++#include <drm/display/drm_dsc.h>
++#include <drm/display/drm_dsc_helper.h>
++#include <drm/drm_mipi_dsi.h>
++#include <drm/drm_modes.h>
++#include <drm/drm_panel.h>
++#include <drm/drm_probe_helper.h>
++
++#define EA8082_BRIGHTNESS_MAX		1023
++#define EA8082_BRIGHTNESS_DEFAULT	768
++
++static unsigned int refresh_rate = 60;
++module_param(refresh_rate, uint, 0444);
++MODULE_PARM_DESC(refresh_rate, "Refresh rate in Hz: 60 (default) or 120");
++
++struct ea8082 {
++	struct drm_panel panel;
++	struct mipi_dsi_device *dsi;
++	struct drm_dsc_config dsc;
++	struct gpio_desc *reset_gpio;
++	struct regulator_bulk_data *supplies;
++	const struct drm_display_mode *mode;
++};
++
++/* Power on in this order (vendor: panel_vddi, then panel_vci) */
++static const struct regulator_bulk_data ea8082_supplies[] = {
++	{ .supply = "vddi" },	/* 1.8 V, PM8350C L8 */
++	{ .supply = "vci" },	/* 3.0 V, GPIO-switched */
++};
++
++static inline struct ea8082 *to_ea8082(struct drm_panel *panel)
++{
++	return container_of(panel, struct ea8082, panel);
++}
++
++#define ea8082_test_key_on_lvl2(ctx) \
++	mipi_dsi_generic_write_seq_multi(ctx, 0xf0, 0x5a, 0x5a)
++#define ea8082_test_key_off_lvl2(ctx) \
++	mipi_dsi_generic_write_seq_multi(ctx, 0xf0, 0xa5, 0xa5)
++#define ea8082_test_key_on_lvl3(ctx) \
++	mipi_dsi_generic_write_seq_multi(ctx, 0xfc, 0x5a, 0x5a)
++#define ea8082_test_key_off_lvl3(ctx) \
++	mipi_dsi_generic_write_seq_multi(ctx, 0xfc, 0xa5, 0xa5)
++
++static void ea8082_reset(struct ea8082 *ctx)
++{
++	/* vendor qcom,mdss-dsi-reset-sequence = <0 10>, <1 15> */
++	gpiod_set_value_cansleep(ctx->reset_gpio, 1);
++	usleep_range(10000, 11000);
++	gpiod_set_value_cansleep(ctx->reset_gpio, 0);
++	usleep_range(15000, 16000);
++}
++
++static int ea8082_on(struct ea8082 *ctx)
++{
++	struct mipi_dsi_multi_context dsi_ctx = { .dsi = ctx->dsi };
++	struct drm_dsc_picture_parameter_set pps;
++	const u8 rate_cmd[] = {
++		0x60, drm_mode_vrefresh(ctx->mode) > 60 ? 0x08 : 0x00, 0x00
++	};
++
++	ea8082_test_key_on_lvl2(&dsi_ctx);
++	ea8082_test_key_on_lvl3(&dsi_ctx);
++
++	mipi_dsi_dcs_exit_sleep_mode_multi(&dsi_ctx);
++	mipi_dsi_msleep(&dsi_ctx, 30);
++
++	/* TE on (vsync only) */
++	mipi_dsi_generic_write_seq_multi(&dsi_ctx, 0x35, 0x00);
++	/* Column 0..1079, page 0..2399 */
++	mipi_dsi_generic_write_seq_multi(&dsi_ctx, 0x2a, 0x00, 0x00, 0x04, 0x37);
++	mipi_dsi_generic_write_seq_multi(&dsi_ctx, 0x2b, 0x00, 0x00, 0x09, 0x5f);
++
++	mipi_dsi_generic_write_seq_multi(&dsi_ctx, 0xb0, 0x86, 0xbe);
++	mipi_dsi_generic_write_seq_multi(&dsi_ctx, 0xbe,
++					 0x55, 0x40, 0x28, 0x51, 0x66, 0x98, 0x15,
++					 0x55, 0x55, 0x55, 0x08, 0xf1, 0xc6, 0x48,
++					 0x40, 0x00, 0x20, 0x10, 0x09, 0x9a);
++	mipi_dsi_generic_write_seq_multi(&dsi_ctx, 0xb0, 0xc9, 0xc1);
++	mipi_dsi_generic_write_seq_multi(&dsi_ctx, 0xc1, 0x01);
++	mipi_dsi_generic_write_seq_multi(&dsi_ctx, 0xb0, 0x5c, 0xd1);
++	mipi_dsi_generic_write_seq_multi(&dsi_ctx, 0xd1, 0x01);
++	mipi_dsi_generic_write_seq_multi(&dsi_ctx, 0xb0, 0x09, 0xdf);
++	mipi_dsi_generic_write_seq_multi(&dsi_ctx, 0xdf, 0x00, 0x00);
++	mipi_dsi_generic_write_seq_multi(&dsi_ctx, 0xb0, 0x33, 0xd3);
++	mipi_dsi_generic_write_seq_multi(&dsi_ctx, 0xd3,
++					 0x83, 0x00, 0x00, 0x03, 0x00, 0x00, 0x83,
++					 0x00, 0x00, 0x03, 0x00, 0x00);
++	mipi_dsi_generic_write_seq_multi(&dsi_ctx, 0xb0, 0x4d, 0xdd);
++	mipi_dsi_generic_write_seq_multi(&dsi_ctx, 0xdd, 0x30);
++	mipi_dsi_generic_write_seq_multi(&dsi_ctx, 0xb0, 0x15, 0xd1);
++	mipi_dsi_generic_write_seq_multi(&dsi_ctx, 0xd1, 0x2d);
++
++	/* DSC: enable decompression, then send the picture parameter set */
++	mipi_dsi_compression_mode_multi(&dsi_ctx, true);
++	drm_dsc_pps_payload_pack(&pps, &ctx->dsc);
++	print_hex_dump_debug("ea8082 pps: ", DUMP_PREFIX_OFFSET, 16, 1,
++			     &pps, sizeof(pps), false);
++	mipi_dsi_picture_parameter_set_multi(&dsi_ctx, &pps);
++
++	/* Refresh rate: 0x00 = 60 Hz, 0x08 = 120 Hz */
++	mipi_dsi_generic_write_multi(&dsi_ctx, rate_cmd, sizeof(rate_cmd));
++	/* Normal brightness mode, dimming off */
++	mipi_dsi_generic_write_seq_multi(&dsi_ctx, 0x53, 0x20);
++	mipi_dsi_generic_write_seq_multi(&dsi_ctx, 0x51,
++					 EA8082_BRIGHTNESS_DEFAULT >> 8,
++					 EA8082_BRIGHTNESS_DEFAULT & 0xff);
++	/* Latch gamma/LTPS settings */
++	mipi_dsi_generic_write_seq_multi(&dsi_ctx, 0xf7, 0x0f);
++
++	mipi_dsi_generic_write_seq_multi(&dsi_ctx, 0xb0, 0x21, 0xd9);
++	mipi_dsi_generic_write_seq_multi(&dsi_ctx, 0xd9,
++					 0x01, 0x98, 0x0f, 0x00, 0x00, 0x00, 0x0c);
++	mipi_dsi_generic_write_seq_multi(&dsi_ctx, 0xb0, 0x04, 0xf4);
++	mipi_dsi_generic_write_seq_multi(&dsi_ctx, 0xf4, 0x63);
++
++	ea8082_test_key_off_lvl3(&dsi_ctx);
++	ea8082_test_key_off_lvl2(&dsi_ctx);
++	mipi_dsi_msleep(&dsi_ctx, 90);
++
++	return dsi_ctx.accum_err;
++}
++
++static int ea8082_prepare(struct drm_panel *panel)
++{
++	struct ea8082 *ctx = to_ea8082(panel);
++	struct device *dev = &ctx->dsi->dev;
++	int ret;
++
++	ret = regulator_bulk_enable(ARRAY_SIZE(ea8082_supplies), ctx->supplies);
++	if (ret < 0) {
++		dev_err(dev, "Failed to enable regulators: %d\n", ret);
++		return ret;
++	}
++
++	ea8082_reset(ctx);
++
++	ret = ea8082_on(ctx);
++	if (ret < 0) {
++		dev_err(dev, "Failed to initialize panel: %d\n", ret);
++		gpiod_set_value_cansleep(ctx->reset_gpio, 1);
++		regulator_bulk_disable(ARRAY_SIZE(ea8082_supplies), ctx->supplies);
++		return ret;
++	}
++
++	return 0;
++}
++
++static int ea8082_enable(struct drm_panel *panel)
++{
++	struct ea8082 *ctx = to_ea8082(panel);
++	struct mipi_dsi_multi_context dsi_ctx = { .dsi = ctx->dsi };
++
++	mipi_dsi_dcs_set_display_on_multi(&dsi_ctx);
++
++	return dsi_ctx.accum_err;
++}
++
++static int ea8082_disable(struct drm_panel *panel)
++{
++	struct ea8082 *ctx = to_ea8082(panel);
++	struct mipi_dsi_multi_context dsi_ctx = { .dsi = ctx->dsi };
++
++	mipi_dsi_dcs_set_display_off_multi(&dsi_ctx);
++	mipi_dsi_msleep(&dsi_ctx, 20);
++	mipi_dsi_dcs_enter_sleep_mode_multi(&dsi_ctx);
++	mipi_dsi_msleep(&dsi_ctx, 120);
++
++	return dsi_ctx.accum_err;
++}
++
++static int ea8082_unprepare(struct drm_panel *panel)
++{
++	struct ea8082 *ctx = to_ea8082(panel);
++
++	gpiod_set_value_cansleep(ctx->reset_gpio, 1);
++	/* vendor: 11 ms before cutting vci */
++	usleep_range(11000, 12000);
++	regulator_bulk_disable(ARRAY_SIZE(ea8082_supplies), ctx->supplies);
++
++	return 0;
++}
++
++static const struct drm_display_mode ea8082_mode_60 = {
++	.clock = (1080 + 92 + 92 + 92) * (2340 + 12 + 8 + 12) * 60 / 1000,
++	.hdisplay = 1080,
++	.hsync_start = 1080 + 92,
++	.hsync_end = 1080 + 92 + 92,
++	.htotal = 1080 + 92 + 92 + 92,
++	.vdisplay = 2340,
++	.vsync_start = 2340 + 12,
++	.vsync_end = 2340 + 12 + 8,
++	.vtotal = 2340 + 12 + 8 + 12,
++	.width_mm = 67,
++	.height_mm = 150,
++	.type = DRM_MODE_TYPE_DRIVER,
++};
++
++/* vendor fhd120hs: same timings, vertical front porch 16 */
++static const struct drm_display_mode ea8082_mode_120 = {
++	.clock = (1080 + 92 + 92 + 92) * (2340 + 16 + 8 + 12) * 120 / 1000,
++	.hdisplay = 1080,
++	.hsync_start = 1080 + 92,
++	.hsync_end = 1080 + 92 + 92,
++	.htotal = 1080 + 92 + 92 + 92,
++	.vdisplay = 2340,
++	.vsync_start = 2340 + 16,
++	.vsync_end = 2340 + 16 + 8,
++	.vtotal = 2340 + 16 + 8 + 12,
++	.width_mm = 67,
++	.height_mm = 150,
++	.type = DRM_MODE_TYPE_DRIVER,
++};
++
++static int ea8082_get_modes(struct drm_panel *panel,
++			    struct drm_connector *connector)
++{
++	struct ea8082 *ctx = to_ea8082(panel);
++
++	return drm_connector_helper_get_modes_fixed(connector, ctx->mode);
++}
++
++static const struct drm_panel_funcs ea8082_panel_funcs = {
++	.prepare = ea8082_prepare,
++	.enable = ea8082_enable,
++	.disable = ea8082_disable,
++	.unprepare = ea8082_unprepare,
++	.get_modes = ea8082_get_modes,
++};
++
++static int ea8082_bl_update_status(struct backlight_device *bl)
++{
++	struct mipi_dsi_device *dsi = bl_get_data(bl);
++	u16 brightness = backlight_get_brightness(bl);
++
++	return mipi_dsi_dcs_set_display_brightness_large(dsi, brightness);
++}
++
++static const struct backlight_ops ea8082_bl_ops = {
++	.update_status = ea8082_bl_update_status,
++};
++
++static struct backlight_device *ea8082_create_backlight(struct mipi_dsi_device *dsi)
++{
++	struct device *dev = &dsi->dev;
++	const struct backlight_properties props = {
++		.type = BACKLIGHT_RAW,
++		.brightness = EA8082_BRIGHTNESS_DEFAULT,
++		.max_brightness = EA8082_BRIGHTNESS_MAX,
++	};
++
++	return devm_backlight_device_register(dev, dev_name(dev), dev, dsi,
++					      &ea8082_bl_ops, &props);
++}
++
++static int ea8082_probe(struct mipi_dsi_device *dsi)
++{
++	struct device *dev = &dsi->dev;
++	struct ea8082 *ctx;
++	int ret;
++
++	ctx = devm_drm_panel_alloc(dev, struct ea8082, panel,
++				   &ea8082_panel_funcs, DRM_MODE_CONNECTOR_DSI);
++	if (IS_ERR(ctx))
++		return PTR_ERR(ctx);
++
++	ret = devm_regulator_bulk_get_const(dev, ARRAY_SIZE(ea8082_supplies),
++					    ea8082_supplies, &ctx->supplies);
++	if (ret < 0)
++		return dev_err_probe(dev, ret, "Failed to get regulators\n");
++
++	/* Keep the bootloader splash until the first prepare */
++	ctx->reset_gpio = devm_gpiod_get(dev, "reset", GPIOD_ASIS);
++	if (IS_ERR(ctx->reset_gpio))
++		return dev_err_probe(dev, PTR_ERR(ctx->reset_gpio),
++				     "Failed to get reset-gpios\n");
++
++	ctx->mode = refresh_rate == 120 ? &ea8082_mode_120 : &ea8082_mode_60;
++	if (refresh_rate != 60 && refresh_rate != 120)
++		dev_warn(dev, "unsupported refresh_rate %u, using 60 Hz\n", refresh_rate);
++
++	ctx->dsi = dsi;
++	mipi_dsi_set_drvdata(dsi, ctx);
++
++	dsi->lanes = 4;
++	dsi->format = MIPI_DSI_FMT_RGB888;
++	dsi->mode_flags = MIPI_DSI_CLOCK_NON_CONTINUOUS;
++
++	ctx->panel.prepare_prev_first = true;
++
++	ctx->panel.backlight = ea8082_create_backlight(dsi);
++	if (IS_ERR(ctx->panel.backlight))
++		return dev_err_probe(dev, PTR_ERR(ctx->panel.backlight),
++				     "Failed to create backlight\n");
++
++	drm_panel_add(&ctx->panel);
++
++	/* This panel only supports DSC; unconditionally enable it */
++	dsi->dsc = &ctx->dsc;
++
++	ctx->dsc.dsc_version_major = 1;
++	ctx->dsc.dsc_version_minor = 1;
++
++	ctx->dsc.slice_height = 30;
++	ctx->dsc.slice_width = 540;
++	WARN_ON(1080 % ctx->dsc.slice_width);
++	ctx->dsc.slice_count = 1080 / ctx->dsc.slice_width;
++	ctx->dsc.bits_per_component = 8;
++	ctx->dsc.bits_per_pixel = 8 << 4; /* 4 fractional bits */
++	ctx->dsc.block_pred_enable = true;
++
++	ret = mipi_dsi_attach(dsi);
++	if (ret < 0) {
++		dev_err_probe(dev, ret, "Failed to attach to DSI host\n");
++		drm_panel_remove(&ctx->panel);
++		return ret;
++	}
++
++	return 0;
++}
++
++static void ea8082_remove(struct mipi_dsi_device *dsi)
++{
++	struct ea8082 *ctx = mipi_dsi_get_drvdata(dsi);
++	int ret;
++
++	ret = mipi_dsi_detach(dsi);
++	if (ret < 0)
++		dev_err(&dsi->dev, "Failed to detach from DSI host: %d\n", ret);
++
++	drm_panel_remove(&ctx->panel);
++}
++
++static const struct of_device_id ea8082_of_match[] = {
++	{ .compatible = "samsung,ea8082-amb641zr01" },
++	{ /* sentinel */ }
++};
++MODULE_DEVICE_TABLE(of, ea8082_of_match);
++
++static struct mipi_dsi_driver ea8082_driver = {
++	.probe = ea8082_probe,
++	.remove = ea8082_remove,
++	.driver = {
++		.name = "panel-samsung-ea8082",
++		.of_match_table = ea8082_of_match,
++	},
++};
++module_mipi_dsi_driver(ea8082_driver);
++
++MODULE_AUTHOR("RaikaShinohara <321751277+RaikaShinohara@users.noreply.github.com>");
++MODULE_DESCRIPTION("DRM driver for Samsung EA8082 AMB641ZR01 AMOLED panel");
++MODULE_LICENSE("GPL");

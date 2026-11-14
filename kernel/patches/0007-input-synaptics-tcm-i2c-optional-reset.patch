@@ -1,0 +1,22 @@
+From: RaikaShinohara <321751277+RaikaShinohara@users.noreply.github.com>
+Subject: [PATCH] Input: synaptics_tcm_i2c - make the reset GPIO optional
+
+The Samsung Galaxy S21 FE (SM-G990B2) does not wire a reset line to its
+S3908; the controller is reset by cycling its supplies. GPIO 22, used
+for reset on the OnePlus 9RT, is the panel reset on this board.
+---
+--- a/drivers/input/touchscreen/synaptics_tcm_i2c.c
++++ b/drivers/input/touchscreen/synaptics_tcm_i2c.c
+@@ -892,7 +892,11 @@
+ 	if (ret)
+ 		return dev_err_probe(dev, ret, "failed to get supplies\n");
+ 
+-	ts->reset_gpio = devm_gpiod_get(dev, "reset", GPIOD_OUT_HIGH);
++	/*
++	 * Optional: some boards (e.g. Samsung Galaxy S21 FE) do not wire a
++	 * reset line and rely on the supply power cycle instead.
++	 */
++	ts->reset_gpio = devm_gpiod_get_optional(dev, "reset", GPIOD_OUT_HIGH);
+ 	if (IS_ERR(ts->reset_gpio))
+ 		return dev_err_probe(dev, PTR_ERR(ts->reset_gpio),
+ 				     "failed to get reset GPIO\n");

@@ -1,0 +1,170 @@
+# Maintainer: RaikaShinohara <321751277+RaikaShinohara@users.noreply.github.com>
+# Kernel for the Samsung Galaxy S21 FE 5G (Snapdragon 888 / SM8350)
+# Based on linux-postmarketos-stable + one device tree.
+# 0001/0002: persistent console in Samsung's sec_log_buf (TWRP /proc/last_kmsg)
+# and a 'probing X with driver Y' trace when booted with initcall_debug.
+# 0003: route the MAX77705 USB switch to the SoC at boot (no replug needed).
+# 0004: accept the MAX77705 PASS2 silicon used in the S21 FE (charger/fuel gauge).
+# 0005: DRM panel driver for the Samsung EA8082 AMB641ZR01 (DSI cmd mode + DSC,
+#       60/120 Hz via panel_samsung_ea8082.refresh_rate).
+# 0006: Synaptics TouchComm I2C touchscreen driver + binding (S3908), v2 from
+#       linux-input (Vsevolod Nevorotov, 2026-09-10, not merged yet).
+# 0007: make its reset GPIO optional (not wired on this board).
+# 0008: qcom gpi: retire the TX descriptor of I2C reads (TX ring filled up and
+#       every touch read failed with "not enough space in ring").
+# 0009: decode Samsung's 0xc1 coordinate events (the S3908 firmware of this
+#       phone never sends standard TouchComm touch reports).
+# 0010-0019: MAX77705 charger OTG regulator and Type-C/PD driver, from the
+#       Galaxy Tab S8+ port (aaronsb/sm-x800-linux, ADR-003): OTG host with
+#       VBUS, gadget mode via role switch, PD sink at most 9 V / 15 W.
+# 0020: DisplayPort alternate mode on the MAX77705 (HDMI/DP adapters).
+# 0021: gcc-sm8350 GP clocks with the general purpose ops (any rate and duty),
+#       for the vibration motor PWM (clk-pwm on GCC GP2).
+# 0022: max77693-haptic: enable the motor bias on the MAX77705 as well.
+# 0023: sm8250 sound card: samsung,r9q-sndcard, two CS35L41 on primary MI2S
+#       (SCLK as their PLL reference, one I2S slot each).
+# 0024: cs35l41: interrupt the DSP for CSPL mailbox commands (Samsung's
+#       speaker protection firmware 20.1.35 needs it, and up to 15 ms).
+# 0025: cs35l41: factory speaker calibration (cirrus,calibration) and CSPL
+#       resume after the amplifier's global enable.
+# 0026: build the MAX77705 Type-C driver as max77705_typec: its old module
+#       name clashed with the (built-in) MAX77705 MFD core, so udev's modprobe
+#       never loaded it and the display waited forever for DisplayPort.
+pkgname=linux-samsung-r9q
+pkgver=7.2.13
+pkgrel=10
+_kver=${pkgver%.*}
+pkgdesc="Samsung Galaxy S21 FE 5G mainline kernel"
+arch="aarch64"
+_carch="arm64"
+_flavor="samsung-r9q"
+url="https://kernel.org"
+license="GPL-2.0-only"
+options="
+	!check
+	!strip
+	!tracedeps
+	pmb:cross-native
+	pmb:kconfigcheck-community
+"
+makedepends="
+	bash
+	bison
+	clang
+	clang-libclang
+	diffutils
+	elfutils-dev
+	findutils
+	flex
+	grep
+	kmod
+	linux-headers
+	lld
+	llvm
+	openssl-dev
+	pahole
+	perl
+	postmarketos-installkernel
+	python3
+	rust
+	rust-bindgen
+	rust-src
+	rustfmt
+	sed
+	zstd
+"
+source="
+	patch-$pkgver.patch.xz::https://cdn.kernel.org/pub/linux/kernel/v${pkgver%%.*}.x/patch-$pkgver.xz
+	linux-$_kver.tar.xz::https://cdn.kernel.org/pub/linux/kernel/v${pkgver%%.*}.x/linux-$_kver.tar.xz
+	0001-soc-qcom-samsung-sec-log-console.patch
+	0002-probe-trace-and-sec-log-kconfig.patch
+	0003-misc-max77705-usb-switch.patch
+	0004-mfd-max77705-accept-pass2.patch
+	0005-drm-panel-add-samsung-ea8082.patch
+	0006-input-add-synaptics-touchcomm-i2c.patch
+	0007-input-synaptics-tcm-i2c-optional-reset.patch
+	0008-dmaengine-qcom-gpi-retire-linked-tx-descriptors.patch
+	0009-input-synaptics-tcm-i2c-samsung-coordinate-events.patch
+	0010-max77705-charger-otg-regulator.patch
+	0011-max77705-charger-battery-info.patch
+	0012-max77705-charger-otg-shutdown.patch
+	0013-max77705-charger-aicl-bounded.patch
+	0014-max77705-charger-aicl-notify.patch
+	0015-max77705-charger-review-fixes.patch
+	0016-max77705-typec.patch
+	0017-max77705-typec-source-attach.patch
+	0018-max77705-typec-prefer-voltage.patch
+	0019-max77705-typec-review-fixes.patch
+	0020-max77705-typec-displayport-altmode.patch
+	0021-clk-qcom-gcc-sm8350-gp-clock-ops.patch
+	0022-input-max77693-haptic-max77705-bias.patch
+	0023-asoc-qcom-sm8250-samsung-r9q-cs35l41.patch
+	0024-asoc-cs35l41-cspl-mailbox-irq.patch
+	0025-asoc-cs35l41-calibration-first-resume.patch
+	0026-usb-typec-max77705-module-name.patch
+	sm8350-samsung-r9q.dts
+	config-$_flavor.aarch64
+"
+builddir="$srcdir/linux-$_kver"
+
+prepare() {
+	default_prepare
+	cp "$srcdir"/sm8350-samsung-r9q.dts arch/arm64/boot/dts/qcom/
+	echo 'dtb-$(CONFIG_ARCH_QCOM) += sm8350-samsung-r9q.dtb' \
+		>> arch/arm64/boot/dts/qcom/Makefile
+	cp "$srcdir/config-$_flavor.$CARCH" .config
+}
+
+build() {
+	unset LDFLAGS
+	make ARCH="$_carch" LLVM=1 \
+		KBUILD_BUILD_VERSION="$((pkgrel + 1 ))-$_flavor"
+}
+
+package() {
+	make modules_install zinstall dtbs_install \
+		ARCH="$_carch" \
+		LLVM=1 \
+		INSTALL_PATH="$pkgdir"/boot \
+		INSTALL_MOD_PATH="$pkgdir"/usr \
+		INSTALL_MOD_STRIP=1 \
+		INSTALL_DTBS_PATH="$pkgdir"/boot/dtbs
+
+	rm -f "$pkgdir"/usr/lib/modules/*/build "$pkgdir"/usr/lib/modules/*/source
+
+	install -Dm644 "$builddir"/include/config/kernel.release \
+		"$pkgdir"/usr/share/kernel/"$_flavor"/kernel.release
+}
+
+sha512sums="
+dcb32e2bfe07b1c7f199f906184f776b20253a1af5d397e8236eea40808740b2266b3112345d9c0ab957370e3e3e31e77f8546e1c88389a9883f21a6d99fd2c0  patch-7.2.13.patch.xz
+47e63679363261a864d271277340a6f2d45f544e1a056be4159df081f4f6537d0efa865c4af26611ab33a3079ee65db88ec2f6bc0e5fff43e0c043cde0cd91e1  linux-7.2.tar.xz
+818761619ca9d01b12e178ca0d68b5d6cdc5f5be0f6e544d4dd993b2d4c9e534bde5e2e6b0947fe43c161236acd9278fbdba97b88e1df5dc8a78827a80d2d037  0001-soc-qcom-samsung-sec-log-console.patch
+19ffde96aad345d50de908706b29c0b518673f19787a9c765dc0cb490f1bec3dd41fb19ee0a82f7feb33c0b9062e2d401793ca97f455478cad2a2857b47ba2a0  0002-probe-trace-and-sec-log-kconfig.patch
+ecec6ec4bc70354e8a481a943b3dcc98e07a4d817c8c7ff897c69c27ef595d81e15141c42e957225e458d5cf413ea9722e172b4ed0acd7be7a8e74bbca964573  0003-misc-max77705-usb-switch.patch
+1a981a25f027191ca289fdc7c12133b8043d04e16c2df76c00e23519fb1b638ff88b201d22e96b53e6e7a1bc6f3e0670f08a6f04d214d416cd8c05bea349105b  0004-mfd-max77705-accept-pass2.patch
+1859c10f72e0dc6eb75036ef6281536f2a819d856389e865e19cc393526f88ed04a307940e0ce71339de97b85ee4c9907e65bccc738cbd46fdeca6979d458db2  0005-drm-panel-add-samsung-ea8082.patch
+5040c9e2432d315c4c066b41b58c4d78323ac58b16a0f48d10ee9713c12ca2e148297cd45de5431d2d8f88f3cb5305641621ec280a3f9bda1f5e918d748af6ed  0006-input-add-synaptics-touchcomm-i2c.patch
+d58d25d23ac798654c60bfe0c8657dd924a38cd81a02534ad3fb80f56351cfc4dcad70a8b932e8cfdf41d783a0e603ca9f15e9ced104031c5c83b2564171932d  0007-input-synaptics-tcm-i2c-optional-reset.patch
+b296b4798a9e54dba012f6f75598b49e0060bcf67e988a84145e234c1b611edd458503e498661dcef014985ed93052aac84b8c23322a0961850e092d6e066490  0008-dmaengine-qcom-gpi-retire-linked-tx-descriptors.patch
+255c6639b2e40e889310b647955504f74cec024b1a74b75c9b7b8270baef2798b04aaf5b9313bf13cd80d81b5c181d1486193ec7fbd651f974340284603a4ac3  0009-input-synaptics-tcm-i2c-samsung-coordinate-events.patch
+6092f5140ea077387f88dc2c4e4263916ff246441ff84bf3cc8e6169fff0bed8969558bae05cf3da497ce9a0fdf4b91294f76a4cf8fa4c03697e1a318dcbda7e  0010-max77705-charger-otg-regulator.patch
+e0be1bf60e87ebf3c33dc14a7fbaa89a8dd0377660db0125b25d220bc39926cc3d2a13ad01f77d44d8ad3a9d4a614583f9354ed9be696e649d8679f11adc0b97  0011-max77705-charger-battery-info.patch
+166f3061ec098ad984e47079e27f8e7bcc1e14d251dbf64a57ff549ae5d16bce324937dc29039813626dbc76285e07f076ace3fbb8c25a1d9ed53e5bf7ee97f8  0012-max77705-charger-otg-shutdown.patch
+f9a7082b45c9ffba4c2dab65b91967dafe7fd3c3654c5a59142e9100634a12c01b2e67808bd7b58c5814a3d8690862302e6b71005b508c21cd9ef845cc3d2664  0013-max77705-charger-aicl-bounded.patch
+a9284dc8804801ab21b68ef591d3d516579648f7ca4680102cd4131d13bce90aa32d625c86a93d0422436476e8b81a78fffcab7c34e9d17e81656b2b7a18862b  0014-max77705-charger-aicl-notify.patch
+101a5ca2a9bb5abce89df0b45a91a0e1f464c14cf35e60d27d2f6277ecf188f0247241d3da9d4cd5818835a6e8ba12caca870055c65a5a1fccaa396a2a6e9d81  0015-max77705-charger-review-fixes.patch
+f860bb02d354053aa1f82b2f845d0f1c5745afca211a03230312175a4faee66551de09a01ae498f6b9b13be626309537de28037e6309fb346eeda1e77279be6d  0016-max77705-typec.patch
+3ac3628cab5d02e39ac4130fec2bdf9449b4be31f5d053292a7c3ea582ac1debf520e3172b16aa545c069f5f2db60cc68fbd81127a6db079cb01931a0da46b4e  0017-max77705-typec-source-attach.patch
+05b279bafd7b066b80f41c44b73dc767e6770d8d1ce4fbaf3c28e30a5bb937fd94e8fb5359beb290e5042441ccce789ce13c4c69fd07b6616662788027d80033  0018-max77705-typec-prefer-voltage.patch
+c0eadb1a176925772e9c557ffbdefedfbc30cdfcf378bcf93dfc3416cf46e7269c6389c6f9d2682f640a752f01650f3cbe765d76c040fe6178989beebdc9a1af  0019-max77705-typec-review-fixes.patch
+3ae0f411b7a7ee553ffa0e28098449950070d1ec44eadb3ed7ae090ba8e2f63dbc982298e4bf3267d6f4a23f22df0661b9f8f374e2d259b385540f1ae049d617  0020-max77705-typec-displayport-altmode.patch
+f34f2c07f37bd28ef0c4c9cce65aa9af6548df23ef6f16788bcc9fd8b8594f0a6f93c4af1a579e554549c048456c9a98ae298e88ff56b0d66cc20e9e6b48d227  0021-clk-qcom-gcc-sm8350-gp-clock-ops.patch
+36bafc59c85e7448424590652d91249bcc06257c418ef8c4d8d954bede70b6d77ac93e9a34edd4d741d60f2fe32471cd46ae3e92c0eb184c8e84cdea4716ee0e  0022-input-max77693-haptic-max77705-bias.patch
+f2cf87f7aca1a90e2468afc075748240ecfa72e8eb8bea98a34399795f5c1ccad8c919714294ff451235ab8f6621cf33eca8c9d8e13949bc48b359b8b4d2a4ca  0023-asoc-qcom-sm8250-samsung-r9q-cs35l41.patch
+96cced208d5b0341e902a20ab89e5f143d8e1fc09a6961633927ee1e342973189c5534287c1b2fecf447cf325706ad8293d956c1ac41b4595c5e6c19ff013187  0024-asoc-cs35l41-cspl-mailbox-irq.patch
+22abdd3a3ac22397bcaca5ec99cde05ccbb0f4353468eeae894311646bf1ef5a113ff6755f87ce786babfbf5dce12863fa8a94fbd3467c8cd24017e963633780  0025-asoc-cs35l41-calibration-first-resume.patch
+15f9051b3fac432153845f276366669b9c655a3eae31e8c9b67eb74867b82854de1c392fbdba039afdbedd8a54280c2099c0a9bb9835d31e88b6d69e17b9972e  0026-usb-typec-max77705-module-name.patch
+5ff9e89ca5e01c12ca7bc22ca49f5f0c155ff1e8ec8590f495dd783bdc23d7a28a85f7f9314af1b5d4f23a936995f27573e28e9c67887f22bb3769acc081dc80  sm8350-samsung-r9q.dts
+89a322f88fea235adee54bd75b313c1491de052b2f99026c5c205241eab6bd4bf26255239334933223e4a97a002a23a543da79c077feaf556c3bdb837571d50b  config-samsung-r9q.aarch64
+"

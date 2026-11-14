@@ -1,0 +1,24 @@
+#!/usr/bin/bash
+# Hook of steamos-session-select (gamescope-session-steam): Steam's "Switch to
+# Desktop", gamescope-session-plus' fallback after repeated crashes, and the
+# "Game mode" launcher in Plasma. Pick plasma-login-manager's next autologin
+# session (root helper through polkit, allowed for the active local session),
+# then end the current session: plasma-login-manager logs in again
+# (Relogin=true) into the chosen one.
+set -euo pipefail
+
+case "${1:-gamescope}" in
+plasma | desktop | plasma-*) target=plasma ;;
+*) target=gamescope ;;
+esac
+
+pkexec /usr/lib/r9q/r9q-session-set "${target}"
+
+if [[ "${target}" == plasma ]]; then
+	# in the gamescope session: closing Steam ends the session
+	steam -shutdown || true
+else
+	# in Plasma: log out without the confirmation dialog
+	busctl --user call org.kde.Shutdown /Shutdown org.kde.Shutdown logout 2>/dev/null ||
+		loginctl terminate-session "${XDG_SESSION_ID:-}"
+fi

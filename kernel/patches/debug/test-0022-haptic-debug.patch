@@ -1,0 +1,30 @@
+--- a/drivers/pwm/pwm-clk.c
++++ b/drivers/pwm/pwm-clk.c
+@@ -68,6 +68,8 @@
+ 
+ 	rate = DIV64_U64_ROUND_UP(NSEC_PER_SEC, period);
+ 	ret = clk_set_rate(pcchip->clk, rate);
++	dev_info(pwmchip_parent(chip), "DEBUG set_rate %u -> %lu Hz (%d), duty %llu/%llu\n",
++		 rate, clk_get_rate(pcchip->clk), ret, duty_cycle, period);
+ 	if (ret)
+ 		return ret;
+ 
+--- a/drivers/input/misc/max77693-haptic.c
++++ b/drivers/input/misc/max77693-haptic.c
+@@ -198,6 +198,16 @@
+ 	if (error)
+ 		goto err_enable_config;
+ 
++	{
++		unsigned int m1 = 0xdead, mc = 0xdead, mc2 = 0xdead;
++
++		regmap_read(haptic->regmap_haptic, 0x02, &m1);
++		regmap_read(haptic->regmap_haptic, 0x10, &mc);
++		regmap_read(haptic->regmap_haptic, 0x11, &mc2);
++		dev_info(haptic->dev, "DEBUG enable: MAINCTRL1 0x%02x MCONFIG 0x%02x MCONFIG2 0x%02x duty %u\n",
++			 m1, mc, mc2, haptic->pwm_duty);
++	}
++
+ 	haptic->enabled = true;
+ 
+ 	return;

@@ -1,0 +1,81 @@
+--- a/hexagonrpcd/rpcd_builder.c
++++ b/hexagonrpcd/rpcd_builder.c
+@@ -32,6 +32,8 @@
+ #define SENSORS_REGISTRY	"/sensors/registry/"
+ #define SNS_REG_CONFIG		"/sensors/sns_reg.conf"
+ #define SYSFS_SOCINFO		"/socinfo/"
++#define SNS_REG_VERSION		"/sensors/sns_reg_version"
++#define SSC_HW_REV		"/socinfo/ssc_hw_rev"
+ 
+ static struct hexagonfs_dirent *hfs_mkdir(const char *name, size_t n_ents, ...)
+ {
+@@ -112,6 +114,7 @@
+ struct hexagonfs_dirent *construct_root_dir(const char *prefix, const char *dsp)
+ {
+ 	char *acdbdata, *dsp_libs, *sns_cfg, *sns_reg, *sns_reg_config, *socinfo;
++	char *sns_reg_version, *ssc_hw_rev;
+ 	size_t n_prefix;
+ 	struct hexagonfs_dirent *persist_dir, *vendor_dir;
+ 
+@@ -122,6 +125,8 @@
+ 	sns_reg = malloc(n_prefix + strlen(SENSORS_REGISTRY) + 1);
+ 	sns_reg_config = malloc(n_prefix + strlen(SNS_REG_CONFIG) + 1);
+ 	socinfo = malloc(n_prefix + strlen(SYSFS_SOCINFO) + 1);
++	sns_reg_version = malloc(n_prefix + strlen(SNS_REG_VERSION) + 1);
++	ssc_hw_rev = malloc(n_prefix + strlen(SSC_HW_REV) + 1);
+ 
+ 	dsp_libs = malloc(n_prefix + strlen(DSP_LIBS) + strlen(dsp) + 1);
+ 
+@@ -150,6 +155,16 @@
+ 		strcat(socinfo, SYSFS_SOCINFO);
+ 	}
+ 
++	if (sns_reg_version != NULL) {
++		strcpy(sns_reg_version, prefix);
++		strcat(sns_reg_version, SNS_REG_VERSION);
++	}
++
++	if (ssc_hw_rev != NULL) {
++		strcpy(ssc_hw_rev, prefix);
++		strcat(ssc_hw_rev, SSC_HW_REV);
++	}
++
+ 	if (dsp_libs != NULL) {
+ 		strcpy(dsp_libs, prefix);
+ 		strcat(dsp_libs, DSP_LIBS);
+@@ -162,8 +177,14 @@
+ 	 */
+ 	persist_dir = hfs_mkdir("persist", 1,
+ 				hfs_mkdir("sensors", 1,
+-					hfs_mkdir("registry", 1,
+-						hfs_map("registry", sns_reg)
++					/*
++					 * Newer SSC firmware (e.g. Samsung SM8350) reads
++					 * registry/../sns_reg_version and rebuilds the whole
++					 * registry forever when it is missing.
++					 */
++					hfs_mkdir("registry", 2,
++						hfs_map("registry", sns_reg),
++						hfs_map("sns_reg_version", sns_reg_version)
+ 					)
+ 				)
+ 		      );
+@@ -189,9 +210,17 @@
+ 				)
+ 			),
+ 			persist_dir,
+-			hfs_mkdir("sys", 1,
++			hfs_mkdir("sys", 2,
+ 				hfs_mkdir("devices", 1,
+ 					hfs_map_or_empty("soc0", socinfo)
++				),
++				/* Samsung SSC board revision */
++				hfs_mkdir("class", 1,
++					hfs_mkdir("sensors", 1,
++						hfs_mkdir("ssc_core", 1,
++							hfs_map("ssc_hw_rev", ssc_hw_rev)
++						)
++					)
+ 				)
+ 			),
+ 			hfs_mkdir("system", 1,

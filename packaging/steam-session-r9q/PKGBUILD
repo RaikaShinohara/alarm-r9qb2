@@ -1,0 +1,65 @@
+# Maintainer: RaikaShinohara <321751277+RaikaShinohara@users.noreply.github.com>
+# Steam Big Picture game mode on the Galaxy S21 FE, as on ArmadaOS: boot into
+# gamescope-session-steam with Valve's native arm64 Steam client, "Switch to
+# Desktop" goes to Plasma and "Game Mode" in Plasma comes back.
+pkgname=steam-session-r9q
+pkgver=1
+pkgrel=7
+pkgdesc="Steam game mode (arm64 client, gamescope session) for the Galaxy S21 FE"
+arch=('any')
+url="https://github.com/armada-os/armada"
+license=('MIT')
+_steamdev=22ec85e5ff5ea2e15c56d71a41bcbef46356cd60
+depends=(
+	'gamescope-session-steam' 'gamescope-session-plus' 'gamescope' 'xorg-xwayland'
+	'plasma-login-manager' 'polkit' 'curl' 'libarchive' 'xz' 'fuse3' 'bash' 'systemd'
+	# host libraries the arm64 client links against (vgui2_s.so, steamclient.so)
+	'openal' 'gdk-pixbuf2' 'pango' 'libxss'
+	# Steam polls open files with lsof every few seconds
+	'lsof'
+	# Steam's performance overlay in game mode is MangoHud's mangoapp
+	'mangohud'
+	# libvideo.so (loaded by steamui.so) links FFmpeg 8; the system has FFmpeg 9
+	'ffmpeg8-compat'
+)
+backup=('etc/gamescope-session-plus/sessions.d/steam')
+install=steam-session-r9q.install
+source=(
+	steam r9q-steam-bootstrap os-session-select r9q-session-set org.r9q.session.policy
+	plasmalogin-r9q-gaming.conf r9q-session-default.service gamescope-session-steam-r9q
+	r9q-game-mode.desktop steam-arm64.desktop
+	# Valve's udev rules (steam-devices; Arch ships them in the x86-only steam
+	# package): uinput for Steam Input's virtual gamepad, hidraw for controllers
+	"60-steam-input.rules::https://raw.githubusercontent.com/ValveSoftware/steam-devices/$_steamdev/60-steam-input.rules"
+	"steam-devices-LICENSE::https://raw.githubusercontent.com/ValveSoftware/steam-devices/$_steamdev/LICENSE"
+)
+sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP'
+	'284930f83cf8fde8a247057d46f48083d5e4aefc23a54310db02cfc2dbe42e50'
+	'4a8b10a725095d8be78a130dd21984d70976915a658da8fe158d3bc20ca03585')
+
+package() {
+	# `steam` = the arm64 client launcher (installs the client on first start)
+	install -Dm755 steam "$pkgdir"/usr/bin/steam
+	install -Dm755 r9q-steam-bootstrap -t "$pkgdir"/usr/lib/r9q/
+	ln -s ../lib/r9q/r9q-steam-bootstrap "$pkgdir"/usr/bin/r9q-steam-bootstrap
+	install -Dm644 steam-arm64.desktop "$pkgdir"/usr/share/applications/steam.desktop
+
+	# game mode <-> desktop with plasma-login-manager
+	install -Dm755 os-session-select "$pkgdir"/usr/lib/os-session-select
+	install -Dm755 r9q-session-set -t "$pkgdir"/usr/lib/r9q/
+	install -Dm644 org.r9q.session.policy -t "$pkgdir"/usr/share/polkit-1/actions/
+	install -Dm644 plasmalogin-r9q-gaming.conf \
+		"$pkgdir"/usr/lib/plasmalogin/plasmalogin.conf.d/50-r9q-gaming.conf
+	install -Dm644 r9q-session-default.service -t "$pkgdir"/usr/lib/systemd/system/
+	install -d "$pkgdir"/usr/lib/systemd/system/multi-user.target.wants
+	ln -s ../r9q-session-default.service "$pkgdir"/usr/lib/systemd/system/multi-user.target.wants/
+	install -Dm644 r9q-game-mode.desktop -t "$pkgdir"/usr/share/applications/
+
+	# controllers: without these Steam cannot open /dev/uinput ("Couldn't initialize
+	# virtual gamepad") and games get no input from Steam Input
+	install -Dm644 60-steam-input.rules -t "$pkgdir"/usr/lib/udev/rules.d/
+	install -Dm644 steam-devices-LICENSE "$pkgdir"/usr/share/licenses/$pkgname/steam-devices-LICENSE
+
+	# gamescope on this panel (portrait DSI, no EDID)
+	install -Dm644 gamescope-session-steam-r9q "$pkgdir"/etc/gamescope-session-plus/sessions.d/steam
+}

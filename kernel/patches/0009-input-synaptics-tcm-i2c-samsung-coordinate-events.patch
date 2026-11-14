@@ -1,0 +1,96 @@
+From: RaikaShinohara <321751277+RaikaShinohara@users.noreply.github.com>
+Subject: [PATCH] Input: synaptics_tcm_i2c - support Samsung coordinate events
+
+The S3908 firmware of the Samsung Galaxy S21 FE (s3908_r9) never sends the
+standard touch report (0x11). Touches arrive as report 0xc1 with one
+16-byte coordinate event per changed finger, in the format of Samsung's
+sec_ts/sec_input drivers. Decode those; captured on the device:
+  40 a2 d6 04 1e 17 24 20 ...  finger 0 press at x=2592 y=3428
+  84 ce be 9e 18 14 11 01 ...  finger 1 move  at x=3305 y=3054
+---
+--- a/drivers/input/touchscreen/synaptics_tcm_i2c.c
++++ b/drivers/input/touchscreen/synaptics_tcm_i2c.c
+@@ -76,6 +76,21 @@
+ #define SYNA_REPORT_IDENTIFY		0x10
+ #define SYNA_REPORT_TOUCH		0x11
+ #define SYNA_REPORT_LOG			0x1d
++
++/*
++ * Samsung firmware (e.g. Galaxy S21 FE, "s3908_r9") does not send standard
++ * touch reports: it sends report 0xc1 carrying 16-byte coordinate events in
++ * the format of Samsung's own touch drivers (sec_ts / sec_input):
++ *   byte 0: event id [1:0], finger id [5:2], touch status [7:6]
++ *   byte 1: x[11:4], byte 2: y[11:4], byte 3: x[3:0] << 4 | y[3:0]
++ *   byte 4: major, byte 5: minor, byte 6: z [5:0]
++ * One report holds one event per finger that changed.
++ */
++#define SYNA_REPORT_SEC_COORDINATE	0xc1
++#define SYNA_SEC_EVENT_SIZE		16
++#define SYNA_SEC_EID_COORDINATE		0
++#define SYNA_SEC_TCHSTA_NONE		0
++#define SYNA_SEC_TCHSTA_RELEASE		3
+ 
+ #define SYNA_MODE_APPLICATION		0x01
+ 
+@@ -569,6 +584,47 @@
+ 	input_sync(ts->input);
+ }
+ 
++/*
++ * Only the fingers that changed are present in a report, so do not use
++ * input_mt_sync_frame() here: with INPUT_MT_DROP_UNUSED it would lift every
++ * finger that did not move.
++ */
++static void syna_report_sec_events(struct syna_tcm *ts)
++{
++	unsigned int off;
++
++	for (off = 0; off + SYNA_SEC_EVENT_SIZE <= ts->payload_len;
++	     off += SYNA_SEC_EVENT_SIZE) {
++		const u8 *ev = &ts->payload[off];
++		unsigned int eid = ev[0] & 0x3;
++		unsigned int tid = (ev[0] >> 2) & 0xf;
++		unsigned int status = ev[0] >> 6;
++		unsigned int x, y;
++
++		if (eid != SYNA_SEC_EID_COORDINATE || tid >= ts->max_objects ||
++		    status == SYNA_SEC_TCHSTA_NONE)
++			continue;
++
++		input_mt_slot(ts->input, tid);
++		if (status == SYNA_SEC_TCHSTA_RELEASE) {
++			input_mt_report_slot_inactive(ts->input);
++			continue;
++		}
++
++		x = (ev[1] << 4) | (ev[3] >> 4);
++		y = (ev[2] << 4) | (ev[3] & 0xf);
++
++		input_mt_report_slot_state(ts->input, MT_TOOL_FINGER, true);
++		touchscreen_report_pos(ts->input, &ts->prop, x, y, true);
++		input_report_abs(ts->input, ABS_MT_PRESSURE, ev[6] & 0x3f);
++		input_report_abs(ts->input, ABS_MT_TOUCH_MAJOR, max(ev[4], ev[5]));
++		input_report_abs(ts->input, ABS_MT_TOUCH_MINOR, min(ev[4], ev[5]));
++	}
++
++	input_mt_report_pointer_emulation(ts->input, true);
++	input_sync(ts->input);
++}
++
+ static irqreturn_t syna_irq(int irq, void *data)
+ {
+ 	struct syna_tcm *ts = data;
+@@ -576,6 +632,13 @@
+ 	mutex_lock(&ts->lock);
+ 
+ 	if (syna_recv_message(ts) < 0) {
++		mutex_unlock(&ts->lock);
++		return IRQ_HANDLED;
++	}
++
++	if (ts->code == SYNA_REPORT_SEC_COORDINATE) {
++		if (!ts->suspended)
++			syna_report_sec_events(ts);
+ 		mutex_unlock(&ts->lock);
+ 		return IRQ_HANDLED;
+ 	}

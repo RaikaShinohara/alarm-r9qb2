@@ -1,0 +1,12 @@
+# Everything here runs on Linux, and the TWRP installer runs under /sbin/sh,
+# where a CRLF shebang does not execute at all.
+* text=auto eol=lf
+
+*.img binary
+*.gz binary
+*.zip binary
+*.bin binary
+*.dtb binary
+
+# Unified diffs keep a leading space on blank context lines.
+*.patch whitespace=-blank-at-eol,-space-before-tab

@@ -1,0 +1,115 @@
+From: RaikaShinohara <321751277+RaikaShinohara@users.noreply.github.com>
+Subject: [PATCH] ASoC: cs35l41: speaker calibration, resume CSPL after the global enable
+
+Write the factory speaker calibration (optional cirrus,calibration:
+R_DC, ambient, VIMON VSC/ISC) once the DSP runs and before CSPL is
+resumed, as the vendor driver does; older firmware ignores CAL_* writes
+once running. That firmware also resumes only with the amplifier
+globally enabled, and DAPM powers the DSP1 widget before Main AMP: resume
+CSPL from Main AMP right after the global enable, and on the first start.
+
+---
+--- a/sound/soc/codecs/cs35l41.c
++++ b/sound/soc/codecs/cs35l41.c
+@@ -22,6 +22,7 @@
+ #include <sound/soc.h>
+ #include <sound/soc-dapm.h>
+ #include <sound/tlv.h>
++#include <linux/firmware/cirrus/wmfw.h>
+ 
+ #include "cs35l41.h"
+ 
+@@ -210,6 +211,50 @@
+ 	}
+ }
+ 
++#define CS35L41_ALG_ID_CSPL	0xcd
++#define CS35L41_ALG_ID_VIMON	0x400a4
++#define CS35L41_VIMON_CAL_OK	2
++
++static void cs35l41_write_cal_ctl(struct cs35l41_private *cs35l41,
++				  const char *name, unsigned int alg, u32 val)
++{
++	__be32 v = cpu_to_be32(val);
++	int ret;
++
++	ret = wm_adsp_write_ctl(&cs35l41->dsp, name, WMFW_ADSP2_XM, alg,
++				&v, sizeof(v));
++	if (ret)
++		dev_warn(cs35l41->dev, "calibration %s: %d\n", name, ret);
++}
++
++/*
++ * Factory speaker calibration for the protection firmware, from the optional
++ * "cirrus,calibration" property: R_DC, ambient temperature, VIMON VSC and
++ * ISC. The vendor driver writes it once the DSP runs and before CSPL is
++ * resumed; firmware that is already running ignores CAL_* writes.
++ */
++static void cs35l41_apply_calibration(struct cs35l41_private *cs35l41)
++{
++	u32 cal[4];
++
++	if (device_property_read_u32_array(cs35l41->dev, "cirrus,calibration",
++					   cal, ARRAY_SIZE(cal)))
++		return;
++
++	cs35l41_write_cal_ctl(cs35l41, "VSC", CS35L41_ALG_ID_VIMON, cal[2]);
++	cs35l41_write_cal_ctl(cs35l41, "ISC", CS35L41_ALG_ID_VIMON, cal[3]);
++	cs35l41_write_cal_ctl(cs35l41, "VIMON_CAL", CS35L41_ALG_ID_VIMON,
++			      CS35L41_VIMON_CAL_OK);
++	cs35l41_write_cal_ctl(cs35l41, "CAL_STATUS", CS35L41_ALG_ID_CSPL, 1);
++	cs35l41_write_cal_ctl(cs35l41, "CAL_R", CS35L41_ALG_ID_CSPL, cal[0]);
++	cs35l41_write_cal_ctl(cs35l41, "CAL_AMBIENT", CS35L41_ALG_ID_CSPL, cal[1]);
++	cs35l41_write_cal_ctl(cs35l41, "CAL_CHECKSUM", CS35L41_ALG_ID_CSPL,
++			      1 + cal[0]);
++
++	dev_info(cs35l41->dev, "speaker calibration: R_DC %u, ambient %u\n",
++		 cal[0], cal[1]);
++}
++
+ static int cs35l41_dsp_audio_ev(struct snd_soc_dapm_widget *w,
+ 				struct snd_kcontrol *kcontrol, int event)
+ {
+@@ -220,8 +265,28 @@
+ 
+ 	switch (event) {
+ 	case SND_SOC_DAPM_POST_PMU:
+-		if (!cs35l41->dsp.cs_dsp.running)
+-			return wm_adsp_event(w, kcontrol, event);
++		if (!cs35l41->dsp.cs_dsp.running) {
++			ret = wm_adsp_event(w, kcontrol, event);
++			if (ret)
++				return ret;
++
++			/*
++			 * Older CSPL firmware comes up paused and has to be
++			 * calibrated and resumed, as on every later stream.
++			 */
++			cs35l41_apply_calibration(cs35l41);
++		}
++
++		/*
++		 * CSPL resumes only with the amplifier enabled. DAPM powers this
++		 * widget (no register) before "Main AMP", which then resumes CSPL
++		 * itself right after the global enable, as the vendor driver does.
++		 */
++		ret = regmap_read(cs35l41->regmap, CS35L41_PWR_CTRL1, &fw_status);
++		if (ret < 0)
++			return ret;
++		if (!(fw_status & CS35L41_GLOBAL_EN_MASK))
++			return 0;
+ 
+ 		ret = regmap_read(cs35l41->regmap, CS35L41_DSP_MBOX_2, &fw_status);
+ 		if (ret < 0) {
+@@ -520,6 +585,11 @@
+ 
+ 		ret = cs35l41_global_enable(cs35l41->dev, cs35l41->regmap, cs35l41->hw_cfg.bst_type,
+ 					    1, &cs35l41->dsp.cs_dsp);
++		/* see cs35l41_dsp_audio_ev(): CSPL waits for the global enable */
++		if (!ret && cs35l41->dsp.cs_dsp.running &&
++		    cs35l41_set_cspl_mbox_cmd(cs35l41->dev, cs35l41->regmap,
++					      CSPL_MBOX_CMD_RESUME))
++			dev_warn(cs35l41->dev, "CSPL not resumed\n");
+ 		break;
+ 	case SND_SOC_DAPM_POST_PMD:
+ 		ret = cs35l41_global_enable(cs35l41->dev, cs35l41->regmap, cs35l41->hw_cfg.bst_type,

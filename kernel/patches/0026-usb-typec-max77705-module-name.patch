@@ -1,0 +1,23 @@
+From: RaikaShinohara <321751277+RaikaShinohara@users.noreply.github.com>
+Subject: [PATCH] usb: typec: max77705: build the module as max77705_typec
+
+The MAX77705 MFD core driver is also called max77705. With it built in,
+udev's "modprobe max77705" for the of:...Cmaxim,max77705-usbc alias
+resolves to the built-in MFD and returns without loading anything, so the
+Type-C driver never binds: no Type-C port, no DisplayPort HPD bridge, and
+the msm display driver waits forever for its DP component (no screen).
+Built-in test kernels did not hit this.
+
+---
+--- a/drivers/usb/typec/Makefile	2026-11-02 12:34:24.777891054 +0000
++++ b/drivers/usb/typec/Makefile	2026-11-02 12:34:24.792924409 +0000
+@@ -8,7 +8,8 @@
+ obj-$(CONFIG_TYPEC_TPS6598X)	+= tipd/
+ obj-$(CONFIG_TYPEC_ANX7411)	+= anx7411.o
+ obj-$(CONFIG_TYPEC_HD3SS3220)	+= hd3ss3220.o
+-obj-$(CONFIG_TYPEC_MAX77705)	+= max77705.o
++obj-$(CONFIG_TYPEC_MAX77705)	+= max77705_typec.o
++max77705_typec-y		:= max77705.o
+ obj-$(CONFIG_TYPEC_STUSB160X) 	+= stusb160x.o
+ obj-$(CONFIG_TYPEC_RT1719)	+= rt1719.o
+ obj-$(CONFIG_TYPEC_WUSB3801)	+= wusb3801.o

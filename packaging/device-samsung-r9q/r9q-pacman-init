@@ -1,0 +1,13 @@
+#!/bin/sh
+# Create the pacman keyring on the phone itself (the image ships none). Runs
+# at every boot until it has worked once: a first attempt with the clock in
+# 1970 (the PMIC RTC, before clock-epoch existed) left a half-made keyring.
+set -eu
+stamp=/etc/pacman.d/gnupg/.r9q-keyring-ok
+[ -e "$stamp" ] && exit 0
+# make sure the clock is not in 1970 (only moves it forward)
+/usr/lib/r9q/r9q-clock restore
+rm -rf /etc/pacman.d/gnupg
+pacman-key --init
+pacman-key --populate archlinuxarm
+touch "$stamp"

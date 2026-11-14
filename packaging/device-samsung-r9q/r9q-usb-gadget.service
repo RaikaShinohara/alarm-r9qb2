@@ -1,0 +1,13 @@
+[Unit]
+Description=USB networking gadget (172.16.42.1)
+After=sys-kernel-config.mount systemd-modules-load.service
+Before=network.target sshd.service
+Wants=r9q-usb-dhcp.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/r9q/r9q-usb-gadget
+
+[Install]
+WantedBy=multi-user.target

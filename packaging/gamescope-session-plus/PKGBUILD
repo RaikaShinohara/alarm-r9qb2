@@ -1,0 +1,26 @@
+# Maintainer: RaikaShinohara <321751277+RaikaShinohara@users.noreply.github.com>
+# SteamOS-like gamescope session launcher (OpenGamingCollective, formerly
+# ChimeraOS). Same commit as Terra/ArmadaOS use.
+pkgname=gamescope-session-plus
+_commit=08e65a62ed3d7acc6ae17db637091d402a55ae2a
+pkgver=0.20261002
+pkgrel=1
+pkgdesc="Gamescope session launcher (gamescope-session-plus)"
+arch=('any')
+url="https://github.com/OpenGamingCollective/gamescope-session"
+license=('MIT')
+depends=('bash' 'gamescope' 'util-linux')
+source=("gamescope-session-$_commit.tar.gz::$url/archive/$_commit.tar.gz")
+sha256sums=('73b266e6dd01d1aabb60f0c6ff63e00b559112785240c6a43d244ea41496ad49')
+
+package() {
+	cd "gamescope-session-$_commit"
+	install -Dm755 usr/bin/export-gpu usr/bin/gamescope-session-plus -t "$pkgdir"/usr/bin/
+	install -Dm644 usr/lib/systemd/user/gamescope-session-plus@.service \
+		usr/lib/systemd/user/gamescope-session.target -t "$pkgdir"/usr/lib/systemd/user/
+	install -Dm644 usr/share/gamescope-session-plus/device-quirks -t "$pkgdir"/usr/share/gamescope-session-plus/
+	install -Dm755 usr/share/gamescope-session-plus/gamescope-session-plus -t "$pkgdir"/usr/share/gamescope-session-plus/
+	install -Dm644 usr/share/gamescope/scripts/50-custom/50-disable-explicit-sync.lua \
+		-t "$pkgdir"/usr/share/gamescope/scripts/50-custom/
+	install -Dm644 LICENSE -t "$pkgdir"/usr/share/licenses/$pkgname/
+}

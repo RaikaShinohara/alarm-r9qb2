@@ -1,0 +1,32 @@
+#!/bin/sh
+# Bring up the QCA6490 Bluetooth controller (r9q-bt-power.service, started by
+# udev when hci0 appears).
+# With Samsung's patch + NVM (firmware-samsung-r9q) the controller registers
+# "unconfigured": the NVM has no address (Samsung keeps the real one in efs).
+# Give it a stable, locally administered address derived from the machine-id,
+# so pairings survive reboots. Then clear a stale rfkill block (power on can
+# fail with ERFKILL right after registration) and power it on.
+set -u
+
+# hci0 appears before the patch and NVM are loaded (~1 s): wait until the
+# controller reports its configuration options (configured or not)
+cfg=
+i=0
+while [ $i -lt 20 ]; do
+	cfg=$(btmgmt -i hci0 config 2>/dev/null || true)
+	printf '%s\n' "$cfg" | grep -q 'options:' && break
+	sleep 1
+	i=$((i + 1))
+done
+
+if printf '%s\n' "$cfg" | grep -q 'missing options:.*public-address'; then
+	addr=$(sha256sum /etc/machine-id | sed 's/^\(..\)\(..\)\(..\)\(..\)\(..\).*/02:\1:\2:\3:\4:\5/')
+	echo "controller unconfigured: public address $addr"
+	btmgmt -i hci0 public-addr "$addr"
+	sleep 2
+fi
+
+rfkill unblock bluetooth
+sleep 1
+yes | btmgmt -i hci0 power on
+exit 0

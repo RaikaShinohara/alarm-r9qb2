@@ -1,0 +1,25 @@
+From: RaikaShinohara <321751277+RaikaShinohara@users.noreply.github.com>
+Subject: [PATCH] Input: max77693-haptic - enable the motor bias on MAX77705
+
+The MAX77705 has the MAX77843 motor bias bit (MAINCTRL1 bit 7, register
+0x02 on the PMIC) and the motor does not move without it. Samsung sets
+it at probe (max77705_vibrator.c, max77705_vibrator_init_reg()).
+
+---
+--- a/drivers/input/misc/max77693-haptic.c
++++ b/drivers/input/misc/max77693-haptic.c
+@@ -88,7 +88,13 @@
+ {
+ 	int error;
+ 
+-	if (haptic->dev_type != TYPE_MAX77843)
++	/*
++	 * The MAX77705 has the same motor bias bit at the same address
++	 * (MAINCTRL1 0x02, bit 7); Samsung's driver sets it before driving
++	 * the motor, which does not move without it.
++	 */
++	if (haptic->dev_type != TYPE_MAX77843 &&
++	    haptic->dev_type != TYPE_MAX77705)
+ 		return 0;
+ 
+ 	error = regmap_update_bits(haptic->regmap_haptic,

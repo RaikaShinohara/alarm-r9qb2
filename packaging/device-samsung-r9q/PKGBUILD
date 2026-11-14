@@ -1,0 +1,142 @@
+# Maintainer: RaikaShinohara <321751277+RaikaShinohara@users.noreply.github.com>
+# Galaxy S21 FE (r9q) device configuration for Arch Linux ARM: what the
+# postmarketOS device package and pmOS itself provide on this phone.
+# Shared files (UCM, sensor rules, modprobe, iio-sensor-proxy drop-in,
+# kwinrc) are copied from packaging/postmarketos/device-samsung-r9q by
+# build-packages.sh, so both ports stay in sync.
+pkgname=device-samsung-r9q
+pkgver=1
+pkgrel=13
+pkgdesc="Samsung Galaxy S21 FE 5G (Snapdragon) device support for Arch Linux ARM"
+arch=('aarch64')
+url="https://postmarketos.org"
+license=('MIT')
+depends=(
+	'linux-samsung-r9q' 'firmware-samsung-r9q'
+	'mkinitcpio' 'android-tools' 'e2fsprogs' 'dtc' 'zram-generator'
+	'rmtfs' 'tqftpserv' 'hexagonrpcd' 'libssc' 'iio-sensor-proxy'
+	'alsa-ucm-conf' 'bluez' 'bluez-utils' 'networkmanager' 'dnsmasq' 'iproute2'
+)
+backup=('etc/r9q/bootimg.conf')
+install=device-samsung-r9q.install
+source=(
+	r9q-bootimg bootimg.conf 95-r9q-bootimg.hook mkinitcpio-r9q.conf
+	r9q-usb-gadget r9q-usb-gadget.service r9q-usb-dhcp.service NetworkManager-r9q.conf
+	r9q-bt-power r9q-bt-power.service 82-r9q-bluetooth.rules rmtfs-samsung-r9q.conf
+	r9q-macs r9q-macs.service zram-generator-r9q.conf sysctl-r9q-zram.conf
+	r9q-pacman-init r9q-pacman-init.service
+	r9q-clock r9q-clock.service r9q-clock-sync.path r9q-clock-sync.service 83-r9q-clock.rules
+	sleep-r9q.conf iio-sensor-proxy-restart.conf logind-r9q.conf powerdevilrc
+	# shared with the postmarketOS device package
+	ucm-HiFi.conf ucm-Samsung-Galaxy-S21-FE.conf 81-libssc-samsung-r9q.rules
+	modprobe-samsung-r9q.conf iio-sensor-proxy-samsung-r9q.conf kwinrc
+	# copies of pmaports device/community/soc-qcom (what pmOS adds on every
+	# Qualcomm phone)
+	wireplumber-51-qcom.conf UPower-qcom.conf gstreamer-qcom.conf
+	# copies of pmaports main/postmarketos-base-ui
+	90-iio-sensor-proxy-ssc.rules iio-sensor-proxy-shutdown.conf 50-udmabuf.rules
+	qt-mobile-controls.conf
+)
+sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP'
+	'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP'
+	'SKIP' 'SKIP' 'SKIP' 'SKIP'
+	'SKIP' 'SKIP' 'SKIP' 'SKIP'
+	'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP')
+
+package() {
+	# boot images: built after every kernel/initramfs change and flashed
+	install -Dm755 r9q-bootimg "$pkgdir"/usr/lib/r9q/r9q-bootimg
+	install -Dm644 bootimg.conf "$pkgdir"/etc/r9q/bootimg.conf
+	install -Dm644 95-r9q-bootimg.hook -t "$pkgdir"/usr/share/libalpm/hooks/
+	install -Dm644 mkinitcpio-r9q.conf "$pkgdir"/etc/mkinitcpio.conf.d/10-r9q.conf
+
+	# USB networking + SSH, like pmOS (172.16.42.1)
+	install -Dm755 r9q-usb-gadget "$pkgdir"/usr/lib/r9q/r9q-usb-gadget
+	install -Dm644 r9q-usb-gadget.service r9q-usb-dhcp.service -t "$pkgdir"/usr/lib/systemd/system/
+	install -Dm644 NetworkManager-r9q.conf "$pkgdir"/etc/NetworkManager/conf.d/10-r9q-usb0.conf
+
+	# modem services: EFS read-only, the modem itself stays off
+	install -Dm644 rmtfs-samsung-r9q.conf \
+		"$pkgdir"/usr/lib/systemd/system/rmtfs.service.d/10-samsung-r9q.conf
+
+	# Bluetooth: stable address (patched firmware starts unconfigured) + power on
+	install -Dm755 r9q-bt-power "$pkgdir"/usr/lib/r9q/r9q-bt-power
+	# real Wi-Fi/Bluetooth addresses from efs into the device tree (r9q-bootimg)
+	install -Dm755 r9q-macs "$pkgdir"/usr/lib/r9q/r9q-macs
+	install -Dm644 r9q-macs.service -t "$pkgdir"/usr/lib/systemd/system/
+	install -d "$pkgdir"/usr/lib/systemd/system/multi-user.target.wants
+	ln -s ../r9q-macs.service "$pkgdir"/usr/lib/systemd/system/multi-user.target.wants/
+	install -Dm644 r9q-bt-power.service -t "$pkgdir"/usr/lib/systemd/system/
+	install -Dm644 82-r9q-bluetooth.rules -t "$pkgdir"/usr/lib/udev/rules.d/
+
+	# speakers + microphones
+	install -Dm644 ucm-Samsung-Galaxy-S21-FE.conf \
+		"$pkgdir"/usr/share/alsa/ucm2/conf.d/sm8350/Samsung-Galaxy-S21-FE.conf
+	install -Dm644 ucm-HiFi.conf "$pkgdir"/usr/share/alsa/ucm2/Samsung/r9q/HiFi.conf
+
+	# sensors (SLPI via hexagonrpcd + libssc + iio-sensor-proxy)
+	install -Dm644 81-libssc-samsung-r9q.rules -t "$pkgdir"/usr/lib/udev/rules.d/
+	install -Dm644 iio-sensor-proxy-samsung-r9q.conf \
+		"$pkgdir"/usr/lib/systemd/system/iio-sensor-proxy.service.d/10-samsung-r9q.conf
+	# upstream only declares ssc-light/ssc-compass on fastrpc-sdsp: without this
+	# (pmOS ships it in postmarketos-base-ui) there is no accelerometer, so no
+	# screen rotation, and no proximity sensor
+	install -Dm644 90-iio-sensor-proxy-ssc.rules -t "$pkgdir"/usr/lib/udev/rules.d/
+	install -Dm644 iio-sensor-proxy-shutdown.conf \
+		"$pkgdir"/usr/lib/systemd/system/iio-sensor-proxy.service.d/20-shutdown.conf
+	install -Dm644 iio-sensor-proxy-restart.conf \
+		"$pkgdir"/usr/lib/systemd/system/iio-sensor-proxy.service.d/30-restart.conf
+
+	# compressed swap in RAM (zram, as pmOS): games filled the ~5 GB and got OOM-killed
+	install -Dm644 zram-generator-r9q.conf "$pkgdir"/usr/lib/systemd/zram-generator.conf
+	install -Dm644 sysctl-r9q-zram.conf "$pkgdir"/usr/lib/sysctl.d/90-r9q-zram.conf
+
+	# no suspend until it comes back on this phone ("deep" never returns)
+	install -Dm644 sleep-r9q.conf "$pkgdir"/usr/lib/systemd/sleep.conf.d/10-r9q.conf
+	# power button like a phone: screen on/off in a session, nothing on the
+	# login screen (logind powered off), hold to power off
+	install -Dm644 logind-r9q.conf "$pkgdir"/usr/lib/systemd/logind.conf.d/10-r9q.conf
+	install -Dm644 powerdevilrc "$pkgdir"/etc/xdg/powerdevilrc
+
+	# more postmarketos-base-ui defaults: udmabuf for the video group (camera,
+	# GStreamer), touch-friendly Qt Quick Controls
+	install -Dm644 50-udmabuf.rules -t "$pkgdir"/usr/lib/udev/rules.d/
+	install -Dm644 qt-mobile-controls.conf \
+		"$pkgdir"/usr/lib/environment.d/50-qt-mobile-controls.conf
+
+	# pacman keyring, created on the phone (retried until it works)
+	install -Dm755 r9q-pacman-init "$pkgdir"/usr/lib/r9q/r9q-pacman-init
+	install -Dm644 r9q-pacman-init.service -t "$pkgdir"/usr/lib/systemd/system/
+
+	# qcrypto belongs to TrustZone: binding it freezes the SoC
+	install -Dm644 modprobe-samsung-r9q.conf "$pkgdir"/usr/lib/modprobe.d/samsung-r9q.conf
+
+	# Plasma: on-screen keyboard (no hardware keyboard)
+	install -Dm644 kwinrc "$pkgdir"/etc/xdg/kwinrc
+
+	# Qualcomm defaults from pmOS soc-qcom: PipeWire/WirePlumber buffer sizes
+	# for the DSP PCMs, power off on critical battery, hardware video decoders
+	install -Dm644 wireplumber-51-qcom.conf \
+		"$pkgdir"/usr/share/wireplumber/wireplumber.conf.d/51-qcom.conf
+	install -Dm644 UPower-qcom.conf "$pkgdir"/etc/UPower/UPower.conf.d/50-soc-qcom.conf
+	install -Dm644 gstreamer-qcom.conf "$pkgdir"/usr/lib/environment.d/50-soc-qcom-gstreamer.conf
+
+	# Clock: the PMIC RTC only counts since its last reset (it read 1970-04-17)
+	# and Android keeps an offset to it; r9q-clock does the same (offset saved
+	# after NTP sync and at shutdown, applied early at boot). clock-epoch
+	# (mtime = build time, set by makepkg) is the floor when there is no offset
+	# yet, so gpg (pacman keyring) and TLS work before NTP has synced.
+	install -Dm644 /dev/null "$pkgdir"/usr/lib/clock-epoch
+	install -Dm755 r9q-clock "$pkgdir"/usr/lib/r9q/r9q-clock
+	install -Dm644 r9q-clock.service r9q-clock-sync.path r9q-clock-sync.service \
+		-t "$pkgdir"/usr/lib/systemd/system/
+	# r9q-clock.service is started by this rule when rtc0 appears (after the
+	# kernel has reset the clock from the RTC)
+	install -Dm644 83-r9q-clock.rules -t "$pkgdir"/usr/lib/udev/rules.d/
+	install -d "$pkgdir"/usr/lib/systemd/system/multi-user.target.wants
+	ln -s ../r9q-clock-sync.path "$pkgdir"/usr/lib/systemd/system/multi-user.target.wants/
+
+	# The ABL forces console=null: systemd-firstboot always fails (208/STDIN)
+	mkdir -p "$pkgdir"/etc/systemd/system
+	ln -s /dev/null "$pkgdir"/etc/systemd/system/systemd-firstboot.service
+}

@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Game Mode
+Name[es]=Modo juego
+Comment=Return to Steam Big Picture
+Comment[es]=Volver a Steam Big Picture
+Exec=steamos-session-select gamescope
+Icon=input-gaming
+Categories=Game;

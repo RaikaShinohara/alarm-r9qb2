@@ -1,0 +1,26 @@
+--- a/drivers/bluetooth/btqca.c
++++ b/drivers/bluetooth/btqca.c
+@@ -442,7 +442,10 @@
+ 				 * enabling software inband sleep
+ 				 * onto controller side.
+ 				 */
+-				tlv_nvm->data[0] |= 0x80;
++				/* TEST: software in-band sleep left off */
++				tlv_nvm->data[0] &= ~0x80;
++				BT_INFO("TEST: NVM in-band sleep disabled (tag 17 0x%02x)",
++					tlv_nvm->data[0]);
+ 
+ 				/* UART Baud Rate */
+ 				if (soc_type >= QCA_WCN3991)
+--- a/drivers/bluetooth/hci_qca.c
++++ b/drivers/bluetooth/hci_qca.c
+@@ -2032,7 +2032,8 @@
+ 	ret = qca_uart_setup(hdev, qca_baudrate, soc_type, ver,
+ 			firmware_name, rampatch_name);
+ 	if (!ret) {
+-		clear_bit(QCA_IBS_DISABLED, &qca->flags);
++		/* TEST: keep in-band sleep off with the patched firmware */
++		bt_dev_info(hdev, "TEST: keeping IBS disabled");
+ 		qca_debugfs_init(hdev);
+ 		hu->hdev->hw_error = qca_hw_error;
+ 		hu->hdev->reset = qca_reset;

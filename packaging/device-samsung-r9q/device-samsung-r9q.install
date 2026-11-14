@@ -1,0 +1,32 @@
+_r9q_macs() {
+	# Samsung's real Wi-Fi/Bluetooth addresses from efs into the boot image
+	# (used from the next boot); does nothing outside the phone
+	/usr/lib/r9q/r9q-macs || true
+	# Steam binds saved Wi-Fi networks to the card's MAC, and without the efs
+	# address the firmware made up a new 00:03:7f:12:xx:xx one on every boot:
+	# unbind those networks so they connect again automatically
+	command -v nmcli >/dev/null 2>&1 || return 0
+	nmcli -g UUID,TYPE connection show 2>/dev/null | while IFS=: read -r uuid type; do
+		[ "$type" = 802-11-wireless ] || continue
+		mac=$(nmcli -g 802-11-wireless.mac-address connection show "$uuid" 2>/dev/null | tr -d '\\')
+		case "$mac" in
+		00:03:7F:12:*) nmcli connection modify "$uuid" 802-11-wireless.mac-address "" &&
+			echo ">>> Wi-Fi network $uuid no longer bound to the old random MAC $mac" ;;
+		esac
+	done
+}
+
+post_install() {
+	_r9q_macs
+}
+
+post_upgrade() {
+	# Images up to device-samsung-r9q 1-3 created the keyring unit in /etc
+	# (and it gave up after a failed first try): use the packaged one.
+	if [ -f /etc/systemd/system/r9q-pacman-init.service ]; then
+		rm -f /etc/systemd/system/r9q-pacman-init.service \
+			/etc/systemd/system/multi-user.target.wants/r9q-pacman-init.service
+		systemctl enable r9q-pacman-init.service 2>/dev/null || true
+	fi
+	_r9q_macs
+}

@@ -1,0 +1,66 @@
+From: RaikaShinohara <321751277+RaikaShinohara@users.noreply.github.com>
+Subject: [PATCH] dmaengine: qcom: gpi: retire the TX part of I2C reads
+
+An I2C read in GSI mode queues CONFIG + GO (linked to RX) on the TX channel
+and the DMA TRE on the RX channel. Only the RX DMA TRE requests an
+interrupt, so the TX descriptor never completes: its TREs pile up until
+the TX ring is full ("not enough space in ring, avail:1 required:3") and
+every further transfer fails until the channel is reset. Seen with the
+S3908 touchscreen on the Galaxy S21 FE, which only does I2C reads.
+
+When the RX side completes, retire the oldest TX descriptor if none of
+its TREs asks for an event.
+---
+--- a/drivers/dma/qcom/gpi.c
++++ b/drivers/dma/qcom/gpi.c
+@@ -993,6 +993,40 @@
+ }
+ 
+ /* processing transfer completion events */
++/*
++ * An I2C read queues CONFIG + GO on the TX channel (GO linked to RX) and the
++ * DMA TRE on the RX channel. Only the RX DMA TRE asks for an interrupt, so no
++ * completion event ever arrives for the TX part: retire it here once the RX
++ * side completed, otherwise its TREs pile up until the TX ring is full
++ * ("not enough space in ring") and every further transfer fails.
++ */
++static void gpi_retire_linked_tx_desc(struct gpii *gpii)
++{
++	struct gchan *tx_chan = &gpii->gchan[GPI_TX_CHAN];
++	struct virt_dma_desc *vd;
++	struct gpi_desc *gpi_desc;
++	unsigned long flags;
++	u32 i;
++
++	spin_lock_irqsave(&tx_chan->vc.lock, flags);
++	vd = vchan_next_desc(&tx_chan->vc);
++	if (!vd)
++		goto unlock;
++
++	gpi_desc = to_gpi_desc(vd);
++	for (i = 0; i < gpi_desc->num_tre; i++)
++		if (gpi_desc->tre[i].dword[3] & (TRE_FLAGS_IEOT | TRE_FLAGS_IEOB))
++			goto unlock;	/* this one gets its own event */
++
++	tx_chan->ch_ring.rp = gpi_desc->db;
++	/* update must be visible to other cores */
++	smp_wmb();
++	list_del(&vd->node);
++	kfree(gpi_desc);
++unlock:
++	spin_unlock_irqrestore(&tx_chan->vc.lock, flags);
++}
++
+ static void gpi_process_xfer_compl_event(struct gchan *gchan,
+ 					 struct xfer_compl_event *compl_event)
+ {
+@@ -1043,6 +1077,9 @@
+ 	smp_wmb();
+ 
+ 	chid = compl_event->chid;
++	if (chid == GPI_RX_CHAN)
++		gpi_retire_linked_tx_desc(gpii);
++
+ 	if (compl_event->code == MSM_GPI_TCE_EOT && gpii->ieob_set) {
+ 		if (chid == GPI_RX_CHAN)
+ 			goto gpi_free_desc;

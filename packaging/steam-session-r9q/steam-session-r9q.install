@@ -1,0 +1,20 @@
+_autologin_user() {
+	# game mode logs in automatically as the phone's user (uid 1000, as on
+	# ArmadaOS/SteamOS); the image build writes this file itself
+	conf=/etc/plasmalogin.conf.d/10-r9q-autologin.conf
+	[ -e "$conf" ] && return 0
+	user=$(getent passwd 1000 | cut -d: -f1)
+	[ -n "$user" ] || { echo ">>> no user with uid 1000: set User= in $conf for game mode"; return 0; }
+	mkdir -p /etc/plasmalogin.conf.d
+	printf '[Autologin]\nUser=%s\n' "$user" > "$conf"
+	echo ">>> game mode: automatic login as $user ($conf)"
+}
+
+post_install() {
+	_autologin_user
+	echo ">>> the arm64 Steam client is installed on first start (or run r9q-steam-bootstrap as the user)"
+}
+
+post_upgrade() {
+	_autologin_user
+}

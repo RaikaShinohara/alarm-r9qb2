@@ -1,0 +1,26 @@
+# Maintainer: RaikaShinohara <321751277+RaikaShinohara@users.noreply.github.com>
+# Plasma Mobile on the Galaxy S21 FE, with a Samsung DeX style desktop: the
+# phone boots into Plasma Mobile, and when a screen is connected to the USB-C
+# port (DP Alt Mode) that screen gets a desktop Plasma panel (application
+# menu, task manager, system tray, clock) while the phone stays mobile.
+# Plasma Mobile itself switches to its docked mode then (windows with
+# borders, not maximized).
+pkgname=plasma-mobile-r9q
+pkgver=1
+pkgrel=1
+pkgdesc="Plasma Mobile session with a desktop on external screens for the Galaxy S21 FE"
+arch=('any')
+url="https://invent.kde.org/plasma/plasma-mobile"
+license=('MIT')
+depends=('plasma-mobile' 'plasma-desktop' 'plasma-login-manager' 'systemd')
+install=plasma-mobile-r9q.install
+source=(plasmalogin-r9q-mobile.conf r9q-dock r9q-dock.js r9q-dock.desktop)
+sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP')
+
+package() {
+	install -Dm644 plasmalogin-r9q-mobile.conf \
+		"$pkgdir"/usr/lib/plasmalogin/plasmalogin.conf.d/50-r9q-mobile.conf
+	install -Dm755 r9q-dock -t "$pkgdir"/usr/lib/r9q/
+	install -Dm644 r9q-dock.js -t "$pkgdir"/usr/share/r9q/
+	install -Dm644 r9q-dock.desktop -t "$pkgdir"/etc/xdg/autostart/
+}

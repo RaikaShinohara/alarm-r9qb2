@@ -1,0 +1,845 @@
+#!/sbin/sh
+# All-in-one TWRP installer for the Galaxy S21 FE (SM-G990B2, r9q): Arch Linux
+# ARM (KDE Plasma, or the Steam game mode) next to the Android that is already installed, with a boot
+# menu (official Mu-Silicium UEFI + systemd-boot), Xiaomi Pad 5 style; or Arch
+# alone on the whole storage; or Linux removed again.
+#
+# Chosen on the phone with the volume keys (Power confirms):
+#   keep the current split (only if it is already split: Android's data stays)
+#   Linux 25 % / Android 75 %, Linux 50 % / 50 %, Linux 75 % / Android 25 %
+#   Linux 100 %: no Android (boot gets only the selector and the UEFI)
+#   remove Linux: Android gets the whole storage back, with its own boot
+#   cancel
+# A new split works on any storage size (128/256 GB): the old userdata area is
+# divided into 34 userdata (Android; 256 MiB unused with Linux 100 %), 35 esp
+# (512 MiB FAT32), 36 linux (ext4), with one sgdisk call; every other GPT entry
+# stays byte for byte. Shrinking userdata ERASES Android's data (Format Data);
+# the Android system (super) is not touched. The kernel is told about the new
+# table with BLKPG (r9q-tool), so no reboot is needed half way.
+#
+# Then: Arch into `linux`, its kernel/initramfs/DTB + systemd-boot (+ the
+# "Android" entry, Reboot2Android.efi) into the ESP, and `boot`: Android's own
+# boot.img patched with the dual boot selector and the UEFI, or with Linux
+# 100 % the selector and the UEFI alone (header and ramdisk of the boot.img
+# that was there; Android never starts). Android's stock boot.img is kept in
+# the ESP (r9q/boot-android-original.img, carried over when the ESP is
+# formatted again): "remove Linux" and a later split use it. Then the fixed
+# TWRP into `recovery`, recovery flags cleared.
+# Everything is checked (model, layout, boot image, SHA-256 of every payload)
+# before the first write, and every write is read back.
+# Never touched: super, vendor_boot, dtbo, efs, sec_efs, persist, modem, the
+# bootloader chain, any GPT entry other than 34/35/36.
+#
+# R9Q_DRYRUN=1: stop right before the first write (see step 5).
+# R9Q_KEYS="power down power": the key presses, for a run from adb (no one at the phone).
+# R9Q_DDBS: dd block size for the big copies (the PC test needs 64 KiB under qemu-user).
+# R9Q_T=DIR: PC test mode (test-release.sh, in a sandbox with TWRP's own
+# tools): DIR/disk.img is the GPT, DIR/p/sdaN and DIR/p/<name> the partitions
+# (files), DIR/esp the ESP, DIR/keys the key presses, DIR/model the model.
+OUTFD=$2
+ZIP=$3
+T=$R9Q_T
+
+ui() { echo "ui_print $*" >> /proc/self/fd/"$OUTFD"; echo "ui_print" >> /proc/self/fd/"$OUTFD"; }
+STAGE=none
+abort() {
+	ui "ERROR: $*"
+	case $STAGE in
+	none) ui "Nothing has been written to the phone." ;;
+	*) ui "Stopped while: $STAGE. Read the message above before rebooting." ;;
+	esac
+	exit 1
+}
+# mksh arithmetic is 32-bit: sectors and bytes go through awk
+calc() { awk "BEGIN { printf \"%.0f\", ($1) }"; }
+gb() { awk -v s="$1" -v b="$SS" 'BEGIN { printf "%.0f GB", s * b / 1073741824 }'; }
+field() { sed -n "s/^$1: *\\([^ ]*\\).*/\\1/p"; }
+pname() { sed -n "s/^Partition name: '\\(.*\\)'\$/\\1/p"; }
+sha() { sha256sum "$1" | cut -d' ' -f1; }
+hex32() { od -An -tx4 -j "$2" -N 4 "$1" | tr -d ' \n'; }	# little-endian u32 at offset, as hex
+u32() { od -An -tu4 -j "$2" -N 4 "$1" | tr -d ' \n'; }
+le32() { # le32 N: 4 little-endian bytes (N < 2^31)
+	printf "\\$(printf %03o $(($1 & 255)))\\$(printf %03o $((($1 >> 8) & 255)))\\$(printf %03o $((($1 >> 16) & 255)))\\$(printf %03o $((($1 >> 24) & 255)))"
+}
+put() { dd of="$1" bs=1 seek="$2" conv=notrunc 2>/dev/null; }	# put FILE OFFSET < bytes
+pages() { echo $((($1 + 4095) / 4096)); }
+be32() { # be32 FILE OFFSET: big-endian u32 at offset
+	set -- $(od -An -tu1 -j "$2" -N 4 "$1"); echo $((($1 << 24) | ($2 << 16) | ($3 << 8) | $4))
+}
+be64() { # be64 N: 8 big-endian bytes (N < 2^31)
+	printf "\\000\\000\\000\\000\\$(printf %03o $((($1 >> 24) & 255)))\\$(printf %03o $((($1 >> 16) & 255)))\\$(printf %03o $((($1 >> 8) & 255)))\\$(printf %03o $(($1 & 255)))"
+}
+
+W=/tmp/r9q-install
+DISK=/dev/block/sda
+UD_GUID=1B81E7E6-F50D-419B-A739-2AEEF8DA3335	# Samsung: userdata's type GUID == its unique GUID
+ESP_TYPE=C12A7328-F81F-11D2-BA4B-00A0C93EC93B
+LINUX_TYPE=0FC63DAF-8483-4772-8E79-3D69D8477DE4
+ESP_BYTES=536870912	# 512 MiB
+ALIGN_BYTES=2097152	# 2 MiB
+MIN_ANDROID=17179869184	# 16 GiB
+UD_STUB_BYTES=268435456	# userdata left with Linux 100 % (256 MiB, never used)
+FD_SIZE=3145728
+UEFI_KN=4096	# Linux 100 %: the selector's "kernel" is one page, the FD follows
+if [ -n "$T" ]; then
+	W=$T/work DISK=$T/disk.img
+	MODEL=$(cat "$T/model")
+	part() { echo "$T/p/$1"; }	# by name
+	node() { echo "$T/p/sda$1"; }	# by number
+else
+	MODEL=$(getprop ro.boot.em.model)
+	part() { echo "/dev/block/by-name/$1"; }
+	node() { # node N: a device node for sdaN as the kernel sees it now (mknod if ueventd has none)
+		d=$(cat /sys/block/sda/sda$1/dev 2>/dev/null) || return 1
+		n=/dev/block/sda$1
+		if [ -b "$n" ] && [ "$(stat -L -c '%t:%T' "$n")" = "$(printf '%x:%x' "${d%%:*}" "${d##*:}")" ]; then echo "$n"; return 0; fi
+		rm -f "$W/sda$1"
+		mknod "$W/sda$1" b "${d%%:*}" "${d##*:}" && echo "$W/sda$1"
+	}
+fi
+
+ui "Galaxy S21 FE (SM-G990B2) - Arch Linux ARM + Android"
+ui "Dual boot installer with a boot menu"
+
+# --- 1. phone, place, payload --------------------------------------------------------
+[ "$MODEL" = SM-G990B2 ] || abort "this ZIP is only for the SM-G990B2 (this one is '$MODEL')"
+# $W is in TWRP's /tmp, which is RAM (and the ZIP may be there too): only the
+# small files are extracted; the big ones (TWRP, Arch's kernel and initramfs)
+# are checked and later written straight from the ZIP
+rm -rf "$W"; mkdir -p "$W" || abort "cannot create $W"
+unzip -o -q -d "$W" "$ZIP" manifest.txt esp.sha256 dualboot/SHA256SUMS \
+	dualboot/r9q-tool dualboot/shellcode-r9q.bin dualboot/R9Q_UEFI.fd dualboot/Reboot2Android.efi \
+	esp/arch/r9q.dtb esp/loader/entries/arch.conf esp/EFI/BOOT/BOOTAA64.EFI ||
+	abort "the ZIP is incomplete"
+want() { # want PATH: the SHA-256 the ZIP's lists give for PATH (dualboot/... or esp/...)
+	case $1 in
+	dualboot/*) sed -n "s|^\([0-9a-f]\{64\}\)  ${1#dualboot/}\$|\1|p" "$W/dualboot/SHA256SUMS" ;;
+	*) sed -n "s|^\([0-9a-f]\{64\}\)  $1\$|\1|p" "$W/esp.sha256" ;;
+	esac
+}
+zcheck() { # zcheck LIST PREFIX: every file of a SHA-256 list, extracted or in the ZIP
+	while read -r sum name; do
+		f=$2$name
+		if [ -f "$W/$f" ]; then got=$(sha "$W/$f"); else got=$(unzip -p "$ZIP" "$f" | sha256sum | cut -d' ' -f1); fi
+		[ "$got" = "$sum" ] || return 1
+	done < "$1"
+}
+# rootfs.img.gz (1.5 GB) is read straight from the ZIP file: TWRP's unzip
+# (ziptool) holds a whole entry in memory while it extracts it, and with the
+# ZIP itself in /tmp (RAM) the phone ran out of memory (kernel panic "System
+# is deadlocked on memory"). The ZIP's entries are stored, not deflated, so
+# the central directory gives where its bytes are.
+u16() { od -An -tu2 -j "$2" -N 2 "$1" | tr -d ' \n'; }
+zentry() { # zentry NAME -> "DATA_OFFSET SIZE" of a stored entry, from the central directory
+	zs=$(stat -L -c %s "$ZIP") || return 1
+	e=$((zs - 22))
+	[ "$(hex32 "$ZIP" "$e")" = 06054b50 ] || return 1	# end of central directory (no comment)
+	cn=$(u16 "$ZIP" $((e + 10))); co=$(u32 "$ZIP" $((e + 16)))
+	while [ "$cn" -gt 0 ]; do
+		[ "$(hex32 "$ZIP" "$co")" = 02014b50 ] || return 1
+		nl=$(u16 "$ZIP" $((co + 28))); xl=$(u16 "$ZIP" $((co + 30))); cl=$(u16 "$ZIP" $((co + 32)))
+		if [ "$nl" = ${#1} ] && [ "$(dd if="$ZIP" bs=1 skip=$((co + 46)) count="$nl" 2>/dev/null)" = "$1" ]; then
+			[ "$(u16 "$ZIP" $((co + 10)))" = 0 ] || return 1	# stored
+			sz=$(u32 "$ZIP" $((co + 20))); lo=$(u32 "$ZIP" $((co + 42)))
+			[ "$(hex32 "$ZIP" "$lo")" = 04034b50 ] || return 1
+			echo "$((lo + 30 + $(u16 "$ZIP" $((lo + 26))) + $(u16 "$ZIP" $((lo + 28))))) $sz"
+			return 0
+		fi
+		co=$((co + 46 + nl + xl + cl)); cn=$((cn - 1))
+	done
+	return 1
+}
+ROOTFS_AT=$(zentry rootfs.img.gz) || ROOTFS_AT=
+rootfs() { # rootfs: rootfs.img.gz on stdout
+	if [ -n "$ROOTFS_AT" ]; then
+		set -- $ROOTFS_AT
+		# more entries follow rootfs.img.gz in the ZIP: tail is cut off by head
+		# (SIGPIPE), which must not fail the pipeline under pipefail
+		{ tail -c +$(($1 + 1)) "$ZIP" 2>/dev/null; true; } | head -c "$2"
+	else
+		unzip -p "$ZIP" rootfs.img.gz
+	fi
+}
+zcheck "$W/dualboot/SHA256SUMS" dualboot/ || abort "the dual boot files in the ZIP are damaged"
+zcheck "$W/esp.sha256" "" || abort "the Arch boot files in the ZIP are damaged"
+chmod 755 "$W/dualboot/r9q-tool"
+. "$W/manifest.txt"
+[ "$MODE" = dual ] && [ -n "$IMG_SIZE" ] && [ -n "$IMG_SHA256" ] && [ -n "$GZ_SHA256" ] || abort "manifest.txt is incomplete"
+ui "Arch Linux ARM $EDITION ($BUILD), kernel $KERNEL"
+
+# --- 2. the disk ---------------------------------------------------------------------------
+P=$(sgdisk --print "$DISK" 2>/dev/null) || abort "cannot read the partition table"
+SS=$(echo "$P" | sed -n 's/^Sector size (logical[^)]*): \([0-9]*\).*/\1/p')
+[ -n "$SS" ] || abort "unknown sector size"
+[ -n "$T" ] || [ "$SS" = 4096 ] || abort "$SS-byte sectors (4096 expected)"
+I34=$(sgdisk --info=34 "$DISK" 2>/dev/null)
+[ "$(echo "$I34" | pname)" = userdata ] && [ "$(echo "$I34" | field 'Partition GUID code')" = "$UD_GUID" ] ||
+	abort "partition 34 is not userdata: unknown table"
+[ -z "$(sgdisk --info=37 "$DISK" 2>/dev/null | pname)" ] || abort "more than 36 partitions: unknown table"
+FIRST=$(echo "$I34" | field 'First sector')
+UD_LAST=$(echo "$I34" | field 'Last sector')
+I35=$(sgdisk --info=35 "$DISK" 2>/dev/null); I36=$(sgdisk --info=36 "$DISK" 2>/dev/null)
+N35=$(echo "$I35" | pname); N36=$(echo "$I36" | pname)
+if [ -z "$N35$N36" ]; then
+	SPLIT=0 LAST=$UD_LAST
+elif [ "$N35" = esp ] && [ "$N36" = linux ] && [ "$(echo "$I35" | field 'Partition GUID code')" = "$ESP_TYPE" ] &&
+	[ "$(echo "$I36" | field 'Partition GUID code')" = "$LINUX_TYPE" ]; then
+	SPLIT=1 LAST=$(echo "$I36" | field 'Last sector')
+	ESP_FIRST=$(echo "$I35" | field 'First sector'); ESP_LAST=$(echo "$I35" | field 'Last sector')
+	LX_FIRST=$(echo "$I36" | field 'First sector')
+	[ "$(calc "$UD_LAST < $ESP_FIRST && $ESP_LAST < $LX_FIRST")" = 1 ] || abort "35/36 are not after userdata"
+else
+	abort "partitions 35/36 ('$N35', '$N36') are not the dual boot ones: left alone"
+fi
+TOTAL=$(calc "$LAST - $FIRST + 1")
+
+plan() { # plan LINUX_PERCENT -> "ud_last esp_first esp_last lx_first android_sectors linux_sectors"
+	awk -v first="$FIRST" -v last="$LAST" -v pct="$((100 - $1))" -v ss="$SS" -v espb="$ESP_BYTES" -v alb="$ALIGN_BYTES" \
+		-v mina="$MIN_ANDROID" -v minl="$IMG_SIZE" -v stub="$UD_STUB_BYTES" 'BEGIN {
+		align = alb / ss; esp = espb / ss; total = last - first + 1
+		if (pct == 0) android = int(stub / ss / align) * align	# Linux 100 %: a stub userdata
+		else android = int(total * pct / 100 / align) * align
+		ud_last = first + android - 1
+		esp_first = int((ud_last + align) / align) * align
+		esp_last = esp_first + esp - 1
+		lx_first = esp_last + 1
+		if (lx_first % align) lx_first = int(lx_first / align + 1) * align
+		linux = last - lx_first + 1
+		if ((pct > 0 && android * ss < mina) || linux * ss < minl + 2147483648) exit 1
+		printf "%.0f %.0f %.0f %.0f %.0f %.0f\n", ud_last, esp_first, esp_last, lx_first, android, linux
+	}'
+}
+
+# --- 3. the boot images ---------------------------------------------------------------------
+# load FILE DIR: header, kernel, ramdisk and signature of a boot.img into DIR/{hdr,k,r,s}
+# (BLEN = its length); KIND = stock (Android's), dual (Android + selector + UEFI)
+# or uefi (selector + UEFI alone, Linux 100 %)
+load() {
+	mkdir -p "$2"
+	dd if="$1" of="$2/hdr" bs=4096 count=1 2>/dev/null
+	[ "$(dd if="$2/hdr" bs=8 count=1 2>/dev/null)" = "ANDROID!" ] || return 2
+	HV=$(u32 "$2/hdr" 40); KS=$(u32 "$2/hdr" 8); RS=$(u32 "$2/hdr" 12)
+	[ "$HV" = 3 ] || [ "$HV" = 4 ] || return 3
+	SGS=0; [ "$HV" = 4 ] && SGS=$(u32 "$2/hdr" 1580)
+	BLEN=$(((1 + $(pages "$KS") + $(pages "$RS") + $(pages "$SGS")) * 4096))
+	dd if="$1" of="$2/k" bs=4096 skip=1 count="$(pages "$KS")" 2>/dev/null && truncate -s "$KS" "$2/k" || return 4
+	dd if="$1" of="$2/r" bs=4096 skip=$((1 + $(pages "$KS"))) count="$(pages "$RS")" 2>/dev/null
+	dd if="$1" of="$2/s" bs=4096 skip=$((1 + $(pages "$KS") + $(pages "$RS"))) count="$(pages "$SGS")" 2>/dev/null
+	[ "$SGS" -gt 0 ] || : > "$2/s"
+	# a compressed kernel (Image.gz, Image.lz4, .bz2, .xz) is unpacked: the new
+	# boot carries it uncompressed (the ABL boots both)
+	case "$(od -An -tx1 -N 4 "$2/k" | tr -d ' \n')" in
+	1f8b*) unpigz -c < "$2/k" > "$2/k.u" 2>/dev/null ;;
+	02214c18 | 04224d18) "$W/dualboot/r9q-tool" unlz4 < "$2/k" > "$2/k.u" ;;
+	425a68*) bzcat < "$2/k" > "$2/k.u" 2>/dev/null ;;
+	fd377a58) xzcat < "$2/k" > "$2/k.u" 2>/dev/null ;;
+	esac
+	if [ -s "$2/k.u" ]; then mv "$2/k.u" "$2/k"; else rm -f "$2/k.u"; fi
+	[ "$(dd if="$2/k" bs=1 skip=56 count=4 2>/dev/null)" = "ARMd" ] || return 5
+	if [ "$(hex32 "$2/k" 0)" = 14000010 ] &&
+		[ "$(dd if="$2/k" bs=64 skip=1 count=7 2>/dev/null | tr -c 'A-Z0-9' '\n' | grep -c '^R9QDUALB$')" -ge 1 ]; then
+		KSTOCK=$(u32 "$2/k" 48)
+		[ "$(u32 "$2/k" 52)" = 0 ] || return 6
+		if [ "$KSTOCK" -le 65536 ]; then KIND=uefi
+		elif [ "$KSTOCK" -gt 1048576 ] && [ "$KSTOCK" -lt "$KS" ]; then KIND=dual
+		else return 6
+		fi
+	else
+		KIND=stock
+		V=$(head -c 50331648 "$2/k" | tr -c 'A-Za-z0-9.()@_ -' '\n' | grep -m1 '^Linux version [0-9]')
+		# this port's own kernel (built by pmbootstrap) is not Android's
+		case "$V" in
+		*"(pmos@"*) return 7 ;;
+		"") return 8 ;;
+		esac
+	fi
+	return 0
+}
+B=$(part boot)
+load "$B" "$W/cur"
+case $? in
+0) ;;
+2) abort "boot does not hold an Android boot image" ;;
+3) abort "boot has a v$HV header (only v3/v4): it is not your Android ROM's" ;;
+4) abort "cannot read boot" ;;
+5) abort "the kernel in boot is not an arm64 Linux kernel (Image, or Image.gz/.lz4/.bz2/.xz)" ;;
+6) abort "dual boot image with odd sizes" ;;
+7) abort "boot holds the Linux kernel, not Android's. Install your Android ROM first." ;;
+*) abort "the kernel in boot is not recognised" ;;
+esac
+CUR_KIND=$KIND
+# Android's stock boot.img: the one in boot (OSRC=$B, not copied), or the copy
+# in the ESP (OSRC=$W/orig.img, as the ESP may be formatted again); OLEN bytes
+ORIG=0 OSRC= OLEN=
+if [ "$CUR_KIND" = stock ]; then
+	ORIG=1 OSRC=$B OLEN=$BLEN
+elif [ "$SPLIT" = 1 ]; then
+	if [ -n "$T" ]; then
+		cp "$T/esp/r9q/boot-android-original.img" "$W/orig.img" 2>/dev/null
+	else
+		mkdir -p "$W/esp-ro"
+		if mount -t vfat -o ro "$(node 35)" "$W/esp-ro" 2>/dev/null; then
+			cp "$W/esp-ro/r9q/boot-android-original.img" "$W/orig.img" 2>/dev/null
+			umount "$W/esp-ro"
+		fi
+	fi
+	[ -s "$W/orig.img" ] && load "$W/orig.img" "$W/o" && [ "$KIND" = stock ] && [ "$BLEN" = "$(stat -c %s "$W/orig.img")" ] &&
+		ORIG=1 OSRC=$W/orig.img OLEN=$BLEN
+	[ $ORIG = 1 ] || rm -f "$W/orig.img"
+	rm -rf "$W/o"
+fi
+case $CUR_KIND in
+stock) ui "boot: Android (${V#Linux version }), the dual boot is added to it." ;;
+dual) ui "boot: already dual boot, updated (UEFI and selector)." ;;
+uefi) ui "boot: UEFI only (Linux 100 %), updated." ;;
+esac
+[ "$CUR_KIND" != stock ] && [ $ORIG = 0 ] && ui "(no copy of Android's boot in the ESP)"
+
+# the dual boot needs Android's kernel: the one in boot, or the stock copy
+DUAL_OK=0
+case $CUR_KIND in stock | dual) DUAL_OK=1 ;; uefi) DUAL_OK=$ORIG ;; esac
+[ -n "$T" ] && BOOT_PART=$(stat -c %s "$B") || BOOT_PART=$(blockdev --getsize64 "$B")
+# Android's AVB data (ROMs whose boot is signed only with AVB, LineageOS for
+# one): the footer in the last 64 bytes of boot points at the vbmeta right
+# after the image. The dual boot image is longer and overwrites that vbmeta:
+# the ABL then reads the UEFI's bytes as vbmeta and crashes (DXE_ASSERT in
+# String.c, stuck at the Samsung logo for Android and Linux alike). The vbmeta
+# and footer are kept ($W/avb-vbmeta.bin, $W/avb-footer.bin; in the ESP as
+# r9q/boot-android-vbmeta.bin and r9q/boot-android-footer.bin) and put back
+# after every new boot: the vbmeta moved after the new image, the footer
+# pointing at it.
+AVB=0
+avb_read() { # avb_read IMAGE_WITH_FOOTER SIZE: keep its footer and vbmeta, if any
+	fo=$(($2 - 64))
+	[ "$(dd if="$1" bs=1 skip="$fo" count=4 2>/dev/null)" = AVBf ] || return 1
+	vo=$(be32 "$1" $((fo + 24))); vs=$(be32 "$1" $((fo + 32)))
+	[ "$(be32 "$1" $((fo + 20)))" = 0 ] && [ "$vs" -gt 0 ] && [ "$vs" -le 65536 ] && [ "$vo" -lt "$fo" ] || return 1
+	[ "$(dd if="$1" bs=1 skip="$vo" count=4 2>/dev/null)" = AVB0 ] || return 1
+	dd if="$1" of="$W/avb-footer.bin" bs=1 skip="$fo" count=64 2>/dev/null &&
+		dd if="$1" of="$W/avb-vbmeta.bin" bs=4096 skip="$vo" count="$vs" iflag=skip_bytes,count_bytes 2>/dev/null &&
+		[ "$(stat -c %s "$W/avb-vbmeta.bin")" = "$vs" ] || return 1
+	AVB=1
+}
+if [ "$CUR_KIND" = stock ]; then
+	avb_read "$B" "$BOOT_PART"
+elif [ "$SPLIT" = 1 ]; then
+	# the copies kept in the ESP with Android's boot
+	if [ -n "$T" ]; then d=$T/esp/r9q; else d=$W/esp-ro/r9q; mount -t vfat -o ro "$(node 35)" "$W/esp-ro" 2>/dev/null; fi
+	cp "$d/boot-android-footer.bin" "$W/avb-footer.bin" 2>/dev/null && cp "$d/boot-android-vbmeta.bin" "$W/avb-vbmeta.bin" 2>/dev/null &&
+		[ "$(dd if="$W/avb-footer.bin" bs=4 count=1 2>/dev/null)" = AVBf ] &&
+		[ "$(stat -c %s "$W/avb-vbmeta.bin")" = "$(be32 "$W/avb-footer.bin" 32)" ] && AVB=1
+	[ -n "$T" ] || umount "$W/esp-ro" 2>/dev/null
+fi
+# no copy: the vbmeta an earlier install left after its image, if still there
+[ $AVB = 1 ] || avb_read "$B" "$BOOT_PART"
+[ $AVB = 1 ] || rm -f "$W/avb-footer.bin" "$W/avb-vbmeta.bin"
+avb_place() { # avb_place IMAGE: after writing IMAGE to boot, its vbmeta and footer
+	[ $AVB = 1 ] || return 0
+	n=$(stat -c %s "$1")
+	if [ "$n" = "$(be32 "$W/avb-footer.bin" 16)" ]; then
+		# Android's own image: vbmeta and footer exactly as they were
+		vo=$(be32 "$W/avb-footer.bin" 24)
+		cp "$W/avb-footer.bin" "$W/avb-new-footer.bin"
+	else
+		vo=$(($(pages "$n") * 4096))
+		{ dd if="$W/avb-footer.bin" bs=12 count=1 2>/dev/null; be64 "$n"; be64 "$vo"
+			dd if="$W/avb-footer.bin" bs=1 skip=28 2>/dev/null; } > "$W/avb-new-footer.bin"
+	fi
+	vs=$(stat -c %s "$W/avb-vbmeta.bin")
+	[ $((vo + vs)) -le $((BOOT_PART - 64)) ] || abort "no room in boot for Android's vbmeta"
+	# the rest of boot zeroed, as avbtool leaves it (and no trace of an older,
+	# longer image)
+	z=$(((BOOT_PART - 64 - vo) / 4096))
+	dd if=/dev/zero of="$B" bs=4096 seek=$((vo / 4096)) count="$z" conv=notrunc 2>/dev/null &&
+		dd if=/dev/zero of="$B" bs=64 seek=$(((vo + z * 4096) / 64)) count=$(((BOOT_PART - 64 - vo - z * 4096) / 64)) conv=notrunc 2>/dev/null ||
+		abort "clearing the end of boot failed"
+	dd if="$W/avb-vbmeta.bin" of="$B" bs=4096 seek="$vo" oflag=seek_bytes conv=notrunc,fsync 2>/dev/null &&
+		dd if="$W/avb-new-footer.bin" of="$B" bs=64 seek=$(((BOOT_PART - 64) / 64)) conv=notrunc,fsync 2>/dev/null ||
+		abort "writing Android's vbmeta to boot failed"
+	sync
+	[ "$(dd if="$B" bs=4096 skip="$vo" count="$vs" iflag=skip_bytes,count_bytes 2>/dev/null | sha256sum | cut -d' ' -f1)" = "$(sha "$W/avb-vbmeta.bin")" ] &&
+		[ "$(dd if="$B" bs=64 skip=$(((BOOT_PART - 64) / 64)) count=1 2>/dev/null | sha256sum | cut -d' ' -f1)" = "$(sha "$W/avb-new-footer.bin")" ] ||
+		abort "Android's vbmeta was not written correctly to boot"
+}
+
+# --- 4. the choice -----------------------------------------------------------------------------
+# the presses come from a file in the PC test (R9Q_T) and from R9Q_KEYS (adb):
+# the menu reads them in a subshell, so they are consumed from the file
+KEYS=
+[ -n "$T" ] && KEYS=$T/keys
+[ -n "$R9Q_KEYS" ] && { KEYS=$W/keys; printf '%s\n' $R9Q_KEYS > "$KEYS"; }
+key() {
+	if [ -n "$KEYS" ]; then
+		k=$(head -n1 "$KEYS"); sed -i 1d "$KEYS"
+		[ -n "$k" ] || abort "no key presses left (R9Q_KEYS)"
+		echo "$k"
+	else
+		"$W/dualboot/r9q-tool" keys $BL || abort "cannot read the keys"
+	fi
+}
+menu() { # menu TITLE OPTION... -> CHOICE (1-based)
+	t=$1; shift; CHOICE=1
+	while :; do
+		ui " "; ui "$t"; i=1
+		for o in "$@"; do if [ $i = $CHOICE ]; then ui "  >> $o"; else ui "     $o"; fi; i=$((i + 1)); done
+		ui "Volume +/-: move    Power: select"
+		case $(key) in
+		up) CHOICE=$((CHOICE > 1 ? CHOICE - 1 : $#)) ;;
+		down) CHOICE=$((CHOICE < $# ? CHOICE + 1 : 1)) ;;
+		power) return 0 ;;
+		esac
+	done
+}
+# the backlight TWRP dims (this phone has two: "panel" always reads 0): the one lit now
+BL=
+for f in /sys/class/backlight/*/brightness; do
+	[ -n "$T" ] && break
+	v=$(cat "$f" 2>/dev/null); [ -n "$v" ] && [ "$v" != 0 ] && { BL=$f; break; }
+done
+ui " "
+ui "Choose with the volume keys and confirm with Power."
+ui "(If the screen turns off, touch it to turn it on.)"
+# the options and, in ACTS, what each one does
+set --; ACTS=
+if [ "$SPLIT" = 1 ]; then
+	if [ "$CUR_KIND" = uefi ]; then
+		set -- "Keep: Linux 100 %, $(gb "$(calc "$LAST - $LX_FIRST + 1")") (no Android)"
+	else
+		set -- "Keep: Android $(gb "$(calc "$UD_LAST - $FIRST + 1")"), Linux $(gb "$(calc "$LAST - $LX_FIRST + 1")") (Android not erased)"
+	fi
+	ACTS=keep
+fi
+if [ $DUAL_OK = 1 ]; then
+	for L in 25 50 75; do
+		p=$(plan $L) || continue
+		set -- "$@" "Linux $L % ($(gb "$(echo "$p" | cut -d' ' -f6)")) - Android $((100 - L)) % ($(gb "$(echo "$p" | cut -d' ' -f5)"))"
+		ACTS="$ACTS $L"
+	done
+fi
+if p=$(plan 100); then
+	set -- "$@" "Linux 100 % ($(gb "$(echo "$p" | cut -d' ' -f6)")) - no Android"
+	ACTS="$ACTS 100"
+fi
+if [ "$SPLIT" = 1 ] && [ $ORIG = 1 ]; then
+	set -- "$@" "Remove Linux: Android 100 % ($(gb "$TOTAL"))"
+	ACTS="$ACTS remove"
+fi
+set -- "$@" "Cancel (nothing is changed)"
+ACTS="$ACTS cancel"
+[ "$(echo $ACTS | wc -w)" -gt 1 ] || abort "the storage ($(gb "$TOTAL")) is too small to split"
+menu "Storage ($(gb "$TOTAL") for Android + Linux):" "$@"
+ACT=$(echo $ACTS | cut -d' ' -f"$CHOICE")
+[ "$ACT" = cancel ] && { ui "Cancelled. Nothing has been changed."; rm -rf "$W"; exit 0; }
+RESPLIT=0
+case $ACT in
+keep) [ "$CUR_KIND" = uefi ] && TARGET=uefi || TARGET=dual ;;
+remove) TARGET=stock ;;
+100) TARGET=uefi RESPLIT=1 L=100 ;;
+*) TARGET=dual RESPLIT=1 L=$ACT ;;
+esac
+# A ZIP on the internal storage (userdata, sda34): "Keep" only writes linux and
+# the ESP, so userdata stays mounted and the ZIP readable; a new split or
+# "Remove Linux" formats userdata, the ZIP with it: refused before any write.
+ZIP_ON_UD=0
+if [ -z "$T" ]; then
+	zd=$(df "$ZIP" 2>/dev/null | tail -n1 | cut -d' ' -f1)
+	zb=$(readlink -f "$zd" 2>/dev/null); zb=${zb##*/}
+	case "$zb" in
+	sda34) ZIP_ON_UD=1 ;;
+	dm-*) ls /sys/block/"$zb"/slaves 2>/dev/null | grep -qx sda34 && ZIP_ON_UD=1 ;;
+	esac
+fi
+if [ $ZIP_ON_UD = 1 ] && { [ $RESPLIT = 1 ] || [ "$ACT" = remove ]; }; then
+	ui "This option formats the internal storage, where this ZIP is."
+	ui "Nothing has been changed. Install it with ADB Sideload"
+	ui "(Advanced > ADB Sideload) or from a USB drive."
+	rm -rf "$W"; exit 1
+fi
+if [ $RESPLIT = 1 ]; then
+	set -- $(plan "$L")
+	NEW_UD_LAST=$1 ESP_FIRST=$2 ESP_LAST=$3 LX_FIRST=$4 ANDROID_S=$5 LINUX_S=$6
+fi
+# the new boot, built straight into boot-new.img: header of the source boot.img,
+# kernel (patched in place), the FD, ramdisk and signature, each page aligned
+append() { # append FILE: FILE to boot-new.img, padded to a 4 KiB page
+	cat "$1" >> "$W/boot-new.img"
+	n=$(stat -c %s "$W/boot-new.img"); truncate -s $((($(pages "$n")) * 4096)) "$W/boot-new.img"
+}
+case $TARGET in
+dual)
+	# Android's kernel + the selector + the UEFI (header, ramdisk and signature
+	# of the Android boot.img it comes from)
+	A=$W/cur
+	if [ "$CUR_KIND" = uefi ]; then
+		rm -rf "$W/cur"
+		load "$OSRC" "$W/a" || abort "the copy of Android's boot cannot be read"
+		A=$W/a
+	fi
+	if [ "$A" = "$W/cur" ] && [ "$CUR_KIND" = dual ]; then	# re-patch from the Android kernel inside
+		KSTOCK=$(u32 "$A/k" 48)
+		CODE1=$(hex32 "$A/k" 4)
+		truncate -s "$KSTOCK" "$A/k"
+	else
+		C0=$(hex32 "$A/k" 0); CODE1=$(hex32 "$A/k" 4)
+		if [ "$(dd if="$A/k" bs=2 count=1 2>/dev/null)" = MZ ]; then
+			case $CODE1 in 1[4-7]??????) ;; *) abort "Android kernel with an unknown header" ;; esac
+		else
+			case $C0 in 1[4-7]??????) ;; *) abort "Android kernel with an unknown header" ;; esac
+			CODE1=$(printf %08x $((0x14000000 | ((0x$C0 - 0x14000000 - 1) & 0x3FFFFFF))))
+		fi
+		n=$(stat -c %s "$A/k"); truncate -s $(((n + 15) / 16 * 16)) "$A/k"	# the selector copies 16 bytes at a time
+	fi
+	KN=$(stat -c %s "$A/k")
+	printf '\020\000\000\024' | put "$A/k" 0	# b 0x40
+	le32 $((0x$CODE1)) | put "$A/k" 4
+	{ printf '\000\000\300\237\000\000\000\000'; le32 $FD_SIZE; le32 0; le32 "$KN"; le32 0; } | put "$A/k" 32
+	dd if="$W/dualboot/shellcode-r9q.bin" bs=64 skip=1 2>/dev/null | put "$A/k" 64
+	cp "$A/hdr" "$W/boot-new.img"; le32 $((KN + FD_SIZE)) | put "$W/boot-new.img" 8
+	cat "$A/k" >> "$W/boot-new.img"; rm -f "$A/k"
+	append "$W/dualboot/R9Q_UEFI.fd"; append "$A/r"; append "$A/s"
+	;;
+uefi)
+	# Linux 100 %: the selector alone (one page; it finds no mark, and if it
+	# ever did its Android branch goes back to itself) + the UEFI, with the
+	# header and ramdisk of the boot.img that is in boot now
+	rm -f "$W/cur/k"
+	dd if="$W/dualboot/shellcode-r9q.bin" of="$W/k1" bs=4096 count=1 2>/dev/null; truncate -s "$UEFI_KN" "$W/k1"
+	printf '\017\000\000\024' | put "$W/k1" 4	# b 0x40
+	{ le32 524288; le32 0; le32 4194304; le32 0; le32 10; le32 0; } | put "$W/k1" 8	# text_offset, image_size, flags (LE, 4K, anywhere)
+	{ printf '\000\000\300\237\000\000\000\000'; le32 $FD_SIZE; le32 0; le32 "$UEFI_KN"; le32 0; } | put "$W/k1" 32
+	cp "$W/cur/hdr" "$W/boot-new.img"; le32 $((UEFI_KN + FD_SIZE)) | put "$W/boot-new.img" 8
+	cat "$W/k1" >> "$W/boot-new.img"; rm -f "$W/k1"
+	append "$W/dualboot/R9Q_UEFI.fd"; append "$W/cur/r"; append "$W/cur/s"
+	;;
+stock)
+	# Android's own boot.img: already in boot (nothing to write) or the copy
+	[ "$OSRC" = "$B" ] || mv "$W/orig.img" "$W/boot-new.img"
+	;;
+esac
+rm -rf "$W/cur" "$W/a"
+if [ -f "$W/boot-new.img" ]; then
+	NB=$(stat -c %s "$W/boot-new.img")
+	[ "$NB" -le "$BOOT_PART" ] || abort "the new boot ($NB) does not fit in the partition ($BOOT_PART)"
+fi
+
+ui " "
+if [ "$ACT" = remove ]; then
+	ui "Removing Linux: the linux and esp partitions"
+	ui "and all of Android's data are ERASED (like a Format Data);"
+	ui "userdata takes the whole storage again ($(gb "$TOTAL"))"
+	ui "and boot is Android's original again."
+	ui "The fixed TWRP stays in recovery."
+elif [ $RESPLIT = 1 ] && [ "$L" = 100 ]; then
+	ui "New split: Linux 100 % ($(gb "$LINUX_S")), no Android."
+	ui "WARNING: all of Android's data are ERASED and Android"
+	ui "no longer starts (boot holds only the UEFI). Its original boot"
+	ui "is kept in the ESP: 'Remove Linux' puts it back."
+	[ "$SPLIT" = 1 ] && ui "The installed Arch is erased too."
+elif [ $RESPLIT = 1 ]; then
+	ui "New split: Linux $L % ($(gb "$LINUX_S")), Android $((100 - L)) % ($(gb "$ANDROID_S"))."
+	ui "WARNING: all of Android's data are ERASED"
+	ui "(apps, photos, accounts: like a Format Data)."
+	ui "The Android system stays installed."
+	[ "$SPLIT" = 1 ] && ui "The installed Arch is erased too."
+elif [ "$TARGET" = uefi ]; then
+	ui "Linux 100 % is kept: Arch is erased and installed again."
+else
+	ui "The split is kept. Android is not touched;"
+	ui "Arch is erased and installed again."
+fi
+menu "Sure?" "No, cancel" "Yes, install"
+[ "$CHOICE" = 2 ] || { ui "Cancelled. Nothing has been changed."; rm -rf "$W"; exit 0; }
+
+# --- 5. the system image, checked before any write --------------------------------------------
+if [ "$ACT" != remove ]; then
+	ui "Checking the system in the ZIP (a few minutes)..."
+	[ "$(rootfs | sha256sum | cut -d' ' -f1)" = "$GZ_SHA256" ] ||
+		abort "rootfs.img.gz is damaged. Download the ZIP again."
+fi
+# R9Q_DRYRUN=1 (adb shell): every check, the menu and the new boot (left in
+# $W/boot-new.img), then stop before the first write
+[ -n "$R9Q_DRYRUN" ] && { ui "(dry run: nothing written; new boot in $W/boot-new.img)"; exit 0; }
+
+# --- 6. the split ------------------------------------------------------------------------------------
+unmount_sda() { # unmount anything on sda34..36 (and device-mapper devices built on them)
+	[ -n "$T" ] && return 0
+	# the ZIP on userdata ("Keep" only): leave userdata alone, it is not written
+	if [ $ZIP_ON_UD = 1 ]; then pat='sda3[56]'; else pat='sda3[456]'; fi
+	[ $ZIP_ON_UD = 1 ] || for m in /sdcard /data/media /data; do umount "$m" 2>/dev/null || umount -l "$m" 2>/dev/null; done
+	for pass in 1 2; do
+		while read -r dev mnt rest; do
+			r=$(readlink -f "$dev" 2>/dev/null); b=${r##*/}
+			case "$b" in
+			sda34) [ $ZIP_ON_UD = 1 ] && continue ;;
+			sda35 | sda36) ;;
+			dm-*) ls /sys/block/"$b"/slaves 2>/dev/null | grep -qx "$pat" || continue ;;
+			*) continue ;;
+			esac
+			umount "$mnt" 2>/dev/null || umount -l "$mnt" 2>/dev/null
+		done < /proc/mounts
+	done
+	# TWRP keeps a device-mapper "userdata" over sda34 (Android's metadata
+	# encryption) even unmounted: mkfs then says "In use by the system"
+	for d in /sys/block/dm-*; do
+		ls "$d/slaves" 2>/dev/null | grep -qx "$pat" || continue
+		n=$(cat "$d/dm/name" 2>/dev/null) && [ -n "$n" ] && "$W/dualboot/r9q-tool" dmremove "$n" 2>/dev/null
+	done
+}
+kpart() { # kpart add|resize|del N [FIRST_SECTOR SECTORS]: the kernel's view of one entry
+	ks=$(calc "${3:-0} * $SS"); kl=$(calc "${4:-0} * $SS")	# del: 0 0 (r9q-tool wants numbers)
+	case "$ks.$kl" in *[!0-9.]* | .* | *.) return 1 ;; esac
+	if [ -n "$T" ]; then
+		case $1 in del) rm -f "$T/p/sda$2" ;; *) truncate -s "$kl" "$T/p/sda$2" ;; esac
+		return 0
+	fi
+	"$W/dualboot/r9q-tool" blkpg "$1" "$DISK" "$2" "$ks" "$kl"
+}
+ksize() { # ksize N: bytes of sdaN as the kernel sees it
+	if [ -n "$T" ]; then stat -c %s "$T/p/sda$1"; else calc "$(cat /sys/block/sda/sda$1/size) * 512"; fi
+}
+format_android() { # Format Data: empty metadata (Android makes new keys) + new f2fs on userdata
+	MD=$(part metadata)
+	if [ -z "$T" ]; then umount "$MD" 2>/dev/null; umount /metadata 2>/dev/null; fi
+	mke2fs -t ext4 -F -q "$MD" >/dev/null 2>&1 || abort "could not empty metadata"
+	make_f2fs -g android "$(node 34)" >/dev/null 2>&1 || abort "could not format userdata"
+	[ "$(od -An -tx1 -j 1024 -N 4 "$(node 34)" | tr -d ' \n')" = 1020f5f2 ] || abort "userdata did not end up as f2fs"
+	ui "Android's data erased (new userdata, empty metadata)."
+}
+format_esp() {
+	mkfs.fat -F 32 -s 1 -n ESP "$(node 35)" >/dev/null 2>&1 || abort "could not format the ESP"
+	[ -n "$T" ] && { rm -rf "${T:?}/esp"; mkdir -p "$T/esp"; }	# the test's ESP is a directory
+	ui "esp: new FAT32."
+}
+write_boot() { # write_boot IMAGE
+	dd if="$1" of="$B" bs="${R9Q_DDBS:-1048576}" conv=notrunc,fsync 2>/dev/null || abort "writing boot failed"
+	sync
+	[ "$(head -c "$(stat -c %s "$1")" "$B" | sha256sum | cut -d' ' -f1)" = "$(sha "$1")" ] || abort "boot was not written correctly"
+}
+clear_flags() { # normal boot next time
+	printf '\000\000\000\000' | dd of="$(part param)" bs=4 count=1 conv=notrunc 2>/dev/null
+	dd if=/dev/zero of="$(part misc)" bs=4096 count=8 conv=notrunc 2>/dev/null
+	sync
+}
+
+if [ "$ACT" = remove ]; then
+	# Android's boot first: whatever happens later, the phone starts Android
+	# (a half done table is then fixed with Format Data in TWRP)
+	STAGE="writing Android's original boot"
+	if [ -f "$W/boot-new.img" ]; then
+		ui "Writing Android's original boot..."
+		write_boot "$W/boot-new.img"
+		avb_place "$W/boot-new.img"
+	fi
+	STAGE="the partition table"
+	unmount_sda
+	sgdisk --backup="$W/gpt-before.bin" "$DISK" >/dev/null 2>&1 || abort "cannot save the current table"
+	ui "Writing the partition table (whole userdata)..."
+	sgdisk --set-alignment=1 --delete=36 --delete=35 --delete=34 \
+		--new=34:"$FIRST":"$LAST" --typecode=34:"$UD_GUID" --partition-guid=34:"$UD_GUID" --change-name=34:userdata \
+		"$DISK" >/dev/null 2>&1 || {
+		sgdisk --load-backup="$W/gpt-before.bin" "$DISK" >/dev/null 2>&1
+		abort "sgdisk failed (the previous table was loaded back)"
+	}
+	sync
+	C34=$(sgdisk --info=34 "$DISK" 2>/dev/null)
+	[ "$(echo "$C34" | field 'First sector')-$(echo "$C34" | field 'Last sector')" = "$FIRST-$LAST" ] &&
+		[ "$(echo "$C34" | pname)" = userdata ] && [ "$(echo "$C34" | field 'Partition unique GUID')" = "$UD_GUID" ] &&
+		[ -z "$(sgdisk --info=35 "$DISK" 2>/dev/null | pname)$(sgdisk --info=36 "$DISK" 2>/dev/null | pname)" ] || {
+		sgdisk --load-backup="$W/gpt-before.bin" "$DISK" >/dev/null 2>&1
+		abort "the table did not come out as asked (the previous one was loaded back)"
+	}
+	ui "New table written: 34 userdata takes everything."
+	STAGE="erasing Android's data"
+	dd if=/dev/zero of="$(node 34)" bs=4096 count=1024 conv=notrunc 2>/dev/null
+	sync
+	STAGE="telling the kernel about the new table"
+	ok=1
+	kpart del 36 || ok=0
+	kpart del 35 || ok=0
+	[ -n "$T" ] && rm -rf "${T:?}/esp"	# the test's ESP is a directory
+	[ $ok = 1 ] && kpart resize 34 "$FIRST" "$TOTAL" || ok=0
+	[ $ok = 1 ] && [ "$(ksize 34)" = "$(calc "$TOTAL * $SS")" ] || ok=0
+	if [ $ok = 0 ]; then
+		ui "The new table and Android's boot are written, but"
+		ui "TWRP's kernel still uses the old table. To finish:"
+		ui "Reboot -> Recovery, then in TWRP: Wipe -> Format Data."
+		exit 1
+	fi
+	STAGE="formatting"
+	format_android
+	clear_flags
+	rm -rf "$W"
+	STAGE=done
+	ui " "
+	ui "Done. Linux removed: Android has the whole storage."
+	ui "Android will start as freshly formatted (initial setup)."
+	exit 0
+fi
+
+if [ $RESPLIT = 1 ]; then
+	STAGE="the partition table"
+	unmount_sda
+	sgdisk --backup="$W/gpt-before.bin" "$DISK" >/dev/null 2>&1 || abort "cannot save the current table"
+	ui "Writing the new partition table..."
+	DEL=; [ "$SPLIT" = 1 ] && DEL="--delete=35 --delete=36"
+	sgdisk --set-alignment=1 $DEL --delete=34 \
+		--new=34:"$FIRST":"$NEW_UD_LAST" --typecode=34:"$UD_GUID" --partition-guid=34:"$UD_GUID" --change-name=34:userdata \
+		--new=35:"$ESP_FIRST":"$ESP_LAST" --typecode=35:"$ESP_TYPE" --change-name=35:esp \
+		--new=36:"$LX_FIRST":"$LAST" --typecode=36:"$LINUX_TYPE" --change-name=36:linux \
+		"$DISK" >/dev/null 2>&1 || {
+		sgdisk --load-backup="$W/gpt-before.bin" "$DISK" >/dev/null 2>&1
+		abort "sgdisk failed (the previous table was loaded back)"
+	}
+	sync
+	C34=$(sgdisk --info=34 "$DISK" 2>/dev/null); C35=$(sgdisk --info=35 "$DISK" 2>/dev/null); C36=$(sgdisk --info=36 "$DISK" 2>/dev/null)
+	[ "$(echo "$C34" | field 'Last sector')" = "$NEW_UD_LAST" ] && [ "$(echo "$C34" | pname)" = userdata ] &&
+		[ "$(echo "$C34" | field 'Partition unique GUID')" = "$UD_GUID" ] &&
+		[ "$(echo "$C35" | field 'First sector')" = "$ESP_FIRST" ] && [ "$(echo "$C35" | pname)" = esp ] &&
+		[ "$(echo "$C36" | field 'First sector')" = "$LX_FIRST" ] && [ "$(echo "$C36" | field 'Last sector')" = "$LAST" ] &&
+		[ "$(echo "$C36" | pname)" = linux ] || {
+		sgdisk --load-backup="$W/gpt-before.bin" "$DISK" >/dev/null 2>&1
+		abort "the table did not come out as asked (the previous one was loaded back)"
+	}
+	ui "New table written: 34 userdata, 35 esp, 36 linux."
+	STAGE="erasing Android's data"
+	# from here Android's old data is gone: mark userdata empty first, so that
+	# a re-run ("Keep") formats it even if the next step fails
+	dd if=/dev/zero of="$(node 34)" bs=4096 count=1024 conv=notrunc 2>/dev/null
+	sync
+	STAGE="telling the kernel about the new table"
+	ok=1
+	if [ "$SPLIT" = 1 ]; then kpart del 36 || ok=0; kpart del 35 || ok=0; fi
+	[ $ok = 1 ] && kpart resize 34 "$FIRST" "$ANDROID_S" || ok=0
+	[ $ok = 1 ] && kpart add 35 "$ESP_FIRST" "$(calc "$ESP_LAST - $ESP_FIRST + 1")" || ok=0
+	[ $ok = 1 ] && kpart add 36 "$LX_FIRST" "$LINUX_S" || ok=0
+	[ $ok = 1 ] && [ "$(ksize 34)" = "$(calc "$ANDROID_S * $SS")" ] && [ "$(ksize 36)" = "$(calc "$LINUX_S * $SS")" ] || ok=0
+	if [ $ok = 0 ]; then
+		ui "The new table is written, but TWRP's kernel still uses the old one."
+		ui "To finish: Reboot -> Recovery and install this ZIP again"
+		ui "choosing 'Keep' (it formats what is missing)."
+		exit 1
+	fi
+	STAGE="formatting"
+	format_android
+	format_esp
+else
+	# a split interrupted before formatting left userdata empty (zeros) or with a
+	# filesystem larger than the partition: Android could not use it, so it is
+	# formatted. A working, encrypted Android looks like noise and is never touched.
+	STAGE="checking userdata"
+	U=$(node 34)
+	nonzero=$(head -c 4096 "$U" | tr -d '\000' | wc -c | tr -d ' ')	# bytes != 0 in the first 4 KiB
+	magic=$(od -An -tx1 -j 1024 -N 4 "$U" | tr -d ' \n')
+	big=0
+	if [ "$magic" = 1020f5f2 ]; then
+		blocks=$(od -An -tu4 -j 1060 -N 4 "$U" | tr -d ' \n'); hi=$(u32 "$U" 1064)
+		[ "$hi" = 0 ] && [ "$(calc "$blocks * 4096 > $(ksize 34)")" = 1 ] && big=1
+	fi
+	if [ "$nonzero" = 0 ] || [ $big = 1 ]; then
+		STAGE="formatting userdata"
+		unmount_sda
+		ui "userdata was left half done by an earlier split: formatting it."
+		format_android
+	fi
+	E=$(node 35)
+	if [ "$(dd if="$E" bs=1 skip=82 count=5 2>/dev/null)" != FAT32 ]; then
+		STAGE="formatting the ESP"
+		unmount_sda
+		format_esp
+	fi
+fi
+LXN=$(node 36); ESN=$(node 35)
+[ -n "$LXN" ] && [ -n "$ESN" ] || abort "the esp/linux partitions are not found"
+[ "$(calc "$IMG_SIZE <= $(ksize 36)")" = 1 ] || abort "Arch ($IMG_SIZE bytes) does not fit in linux"
+
+# --- 7. Arch into linux -----------------------------------------------------------------------------
+STAGE="writing Arch to linux"
+unmount_sda
+ui "Writing Arch to the linux partition (several minutes, do not reboot)..."
+set -o pipefail
+rootfs | unpigz -c | dd of="$LXN" bs="${R9Q_DDBS:-4194304}" conv=notrunc 2>"$W/dd.log" ||
+	abort "writing linux failed ($(tail -n1 "$W/dd.log")). Install the ZIP again."
+sync
+ui "Verifying what was written..."
+[ "$(head -c "$IMG_SIZE" "$LXN" | sha256sum | cut -d' ' -f1)" = "$IMG_SHA256" ] ||
+	abort "verifying linux failed. Install the ZIP again."
+
+# --- 8. the ESP: menu, Android entry, Arch's kernel --------------------------------------------------
+STAGE="writing the ESP"
+ui "Writing the boot menu to the ESP..."
+if [ -n "$T" ]; then
+	M=$T/esp
+else
+	M=$W/esp-mnt; mkdir -p "$M"
+	mount -t vfat "$ESN" "$M" || abort "could not mount the ESP"
+fi
+mkdir -p "$M/EFI/BOOT" "$M/arch" "$M/loader/entries" "$M/r9q" || abort "cannot create folders in the ESP"
+printf 'timeout 5\ndefault arch.conf\nconsole-mode keep\n' > "$W/esp/loader/loader.conf"
+FILES="EFI/BOOT/BOOTAA64.EFI arch/Image arch/initramfs.img arch/r9q.dtb loader/entries/arch.conf loader/loader.conf"
+if [ "$TARGET" = dual ]; then
+	mkdir -p "$M/EFI/android" "$W/esp/EFI/android" && cp "$W/dualboot/Reboot2Android.efi" "$W/esp/EFI/android/" || abort "no space in /tmp"
+	printf 'title   Android\nefi     /EFI/android/Reboot2Android.efi\n' > "$W/esp/loader/entries/android.conf"
+	FILES="$FILES EFI/android/Reboot2Android.efi loader/entries/android.conf"
+else
+	rm -rf "$M/EFI/android" "$M/loader/entries/android.conf"	# Linux 100 %: no Android entry
+fi
+for f in $FILES; do
+	if [ -f "$W/esp/$f" ]; then cp "$W/esp/$f" "$M/$f.new"; else unzip -p "$ZIP" "esp/$f" > "$M/$f.new"; fi &&
+		mv -f "$M/$f.new" "$M/$f" || abort "could not copy $f to the ESP"
+done
+# Android's own boot.img, to undo the dual boot or Linux 100 % (write it back to boot)
+if [ $ORIG = 1 ]; then
+	head -c "$OLEN" "$OSRC" > "$M/r9q/boot-android-original.img.new" && mv -f "$M/r9q/boot-android-original.img.new" "$M/r9q/boot-android-original.img" ||
+		abort "could not save the original boot"
+	[ "$(head -c "$OLEN" "$OSRC" | sha256sum | cut -d' ' -f1)" = "$(sha "$M/r9q/boot-android-original.img")" ] || abort "the copy of the original boot does not match"
+	rm -f "$W/orig.img"
+fi
+if [ $AVB = 1 ]; then
+	for x in footer vbmeta; do
+		cp "$W/avb-$x.bin" "$M/r9q/boot-android-$x.bin.new" && mv -f "$M/r9q/boot-android-$x.bin.new" "$M/r9q/boot-android-$x.bin" &&
+			[ "$(sha "$W/avb-$x.bin")" = "$(sha "$M/r9q/boot-android-$x.bin")" ] || abort "could not save Android's AVB $x"
+	done
+fi
+[ -f "$W/gpt-before.bin" ] && cp "$W/gpt-before.bin" "$M/r9q/gpt-before-split.bin"
+sync
+for f in $FILES; do
+	if [ -f "$W/esp/$f" ]; then w=$(sha "$W/esp/$f"); else w=$(want "esp/$f"); fi
+	[ -n "$w" ] && [ "$w" = "$(sha "$M/$f")" ] || abort "$f was not written correctly to the ESP"
+done
+[ -n "$T" ] || umount "$M"
+
+# --- 9. boot: Android + the selector + the UEFI (or the selector + the UEFI alone) ---------------------
+STAGE="writing boot"
+if [ "$TARGET" = uefi ]; then ui "Writing boot (UEFI for Linux)..."; else ui "Writing boot (Android + boot menu)..."; fi
+write_boot "$W/boot-new.img"
+avb_place "$W/boot-new.img"
+
+# --- 10. the fixed TWRP ----------------------------------------------------------------------------------
+STAGE="writing recovery"
+R=$(part recovery); TW=dualboot/twrp-r9q.img; TWS=$(want "$TW")
+TS=$(unzip -p "$ZIP" "$TW" | wc -c | tr -d ' ')
+if [ "$(head -c "$TS" "$R" | sha256sum | cut -d' ' -f1)" = "$TWS" ]; then
+	ui "recovery: already has the fixed TWRP."
+else
+	[ -n "$T" ] && RP=$(stat -c %s "$R") || RP=$(blockdev --getsize64 "$R")
+	[ "$TS" -le "$RP" ] || abort "TWRP does not fit in recovery"
+	ui "Writing the fixed TWRP to recovery..."
+	unzip -p "$ZIP" "$TW" | dd of="$R" bs="${R9Q_DDBS:-1048576}" conv=notrunc,fsync 2>/dev/null || abort "writing recovery failed"
+	sync
+	[ "$(head -c "$TS" "$R" | sha256sum | cut -d' ' -f1)" = "$TWS" ] || abort "recovery was not written correctly"
+fi
+
+# --- 11. normal boot next time ----------------------------------------------------------------------------
+clear_flags
+rm -rf "$W"
+STAGE=done
+ui " "
+if [ "$TARGET" = uefi ]; then
+	ui "Done. On reboot the UEFI starts Arch Linux ARM."
+else
+	ui "Done. On reboot the menu shows: Arch Linux ARM (default, 5 s) or Android."
+fi
+ui "Arch: user alarm, password alarm (change it with passwd)."
+ui "On the first boot Arch reboots once by itself."
+[ $RESPLIT = 1 ] && [ "$TARGET" = dual ] && ui "Android will start as freshly formatted (initial setup)."
+exit 0

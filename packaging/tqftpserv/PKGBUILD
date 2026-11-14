@@ -1,0 +1,28 @@
+# Maintainer: RaikaShinohara <321751277+RaikaShinohara@users.noreply.github.com>
+# QRTR TFTP server: serves firmware files (e.g. modem carrier configs) to
+# the DSPs.
+pkgname=tqftpserv
+pkgver=1.3
+pkgrel=1
+pkgdesc="Qualcomm QRTR TFTP server"
+arch=('aarch64')
+url="https://github.com/linux-msm/tqftpserv"
+license=('BSD-3-Clause')
+depends=('qrtr' 'zstd')
+makedepends=('meson' 'linux-api-headers')
+source=("$pkgname-$pkgver.tar.gz::https://github.com/linux-msm/tqftpserv/archive/refs/tags/v$pkgver.tar.gz"
+	tqftpserv.service)
+sha256sums=('SKIP' 'SKIP')
+
+build() {
+	arch-meson "$pkgname-$pkgver" build
+	meson compile -C build
+}
+
+package() {
+	DESTDIR="$pkgdir" meson install -C build
+	# our own unit (upstream's path/options vary between releases)
+	rm -rf "$pkgdir"/usr/lib/systemd/system/tqftpserv.service
+	install -Dm644 tqftpserv.service -t "$pkgdir"/usr/lib/systemd/system/
+	install -Dm644 "$pkgname-$pkgver"/LICENSE -t "$pkgdir"/usr/share/licenses/$pkgname/ 2>/dev/null || true
+}

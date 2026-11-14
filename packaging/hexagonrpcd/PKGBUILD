@@ -1,0 +1,37 @@
+# Maintainer: RaikaShinohara <321751277+RaikaShinohara@users.noreply.github.com>
+# FastRPC server for the sensor DSP (SLPI): serves it the "hexagonfs" files
+# (registry, calibration). 0001 serves sns_reg_version and Samsung's
+# ssc_hw_rev, without which the SSC rebuilds its registry forever (see
+# docs/porting-log.md, sensors).
+pkgname=hexagonrpcd
+pkgver=0.4.0
+pkgrel=1
+pkgdesc="Qualcomm HexagonFS/FastRPC daemon (patched for the Galaxy S21 FE)"
+arch=('aarch64')
+url="https://github.com/linux-msm/hexagonrpc"
+license=('GPL-3.0-or-later')
+depends=('glibc')
+makedepends=('meson' 'linux-api-headers')
+source=("$pkgname-$pkgver.tar.gz::https://github.com/linux-msm/hexagonrpc/archive/refs/tags/v$pkgver.tar.gz"
+	0001-hexagonfs-sns-reg-version-and-ssc-hw-rev.patch
+	hexagonrpcd-sdsp.service
+	10-fastrpc.rules
+	hexagonrpcd.sysusers)
+sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP')
+
+prepare() {
+	cd hexagonrpc-$pkgver
+	patch -Np1 -i ../0001-hexagonfs-sns-reg-version-and-ssc-hw-rev.patch
+}
+
+build() {
+	arch-meson hexagonrpc-$pkgver build
+	meson compile -C build
+}
+
+package() {
+	DESTDIR="$pkgdir" meson install -C build
+	install -Dm644 hexagonrpcd-sdsp.service -t "$pkgdir"/usr/lib/systemd/system/
+	install -Dm644 10-fastrpc.rules -t "$pkgdir"/usr/lib/udev/rules.d/
+	install -Dm644 hexagonrpcd.sysusers "$pkgdir"/usr/lib/sysusers.d/hexagonrpcd.conf
+}

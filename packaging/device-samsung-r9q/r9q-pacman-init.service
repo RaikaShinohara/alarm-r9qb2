@@ -1,0 +1,14 @@
+[Unit]
+Description=Initialize the pacman keyring
+ConditionPathExists=!/etc/pacman.d/gnupg/.r9q-keyring-ok
+# gpg rejects keys "from the future" while the clock is still in 1970: wait
+# for the RTC (whose registration resets the clock) and for r9q-clock
+Wants=dev-rtc0.device
+After=dev-rtc0.device r9q-clock.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/r9q/r9q-pacman-init
+
+[Install]
+WantedBy=multi-user.target

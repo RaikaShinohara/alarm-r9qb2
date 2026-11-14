@@ -1,0 +1,120 @@
+#!/sbin/sh
+# TWRP installer for Arch Linux ARM on the Galaxy S21 FE (SM-G990B2, r9q) in
+# the dual boot with Android (dualboot/: storage split, Android's boot.img
+# with the selector and the official Mu-Silicium UEFI). Made by
+# make-twrp-zip.sh from a DUAL=1 image. It writes ONLY:
+#   linux (36)  <- rootfs.img.gz (ext4 root; erases the previous Arch)
+#   esp   (35)  <- arch/Image, arch/initramfs.img, arch/r9q.dtb,
+#                  loader/entries/arch.conf, EFI/BOOT/BOOTAA64.EFI (systemd-boot),
+#                  loader/loader.conf (default: Arch)
+#   param/misc  <- "boot recovery" flags cleared
+# Android's userdata, boot, vendor_boot, dtbo and its menu entry
+# (loader/entries/android.conf, EFI/android/) are never touched.
+# Everything is checked (model, layout, dual boot kernel, sizes, SHA-256)
+# before anything is written.
+OUTFD=$2
+ZIP=$3
+
+ui() {
+	echo "ui_print $*" >> /proc/self/fd/"$OUTFD"
+	echo "ui_print" >> /proc/self/fd/"$OUTFD"
+}
+WROTE=0
+abort() {
+	ui "ERROR: $*"
+	[ "$WROTE" = 1 ] || ui "Nothing has been written to the phone."
+	exit 1
+}
+# test mode (test-twrp-installer.sh): "partitions" are files, the ESP a directory
+BLK=${R9Q_TEST_BLK:-/dev/block/by-name}
+part() { echo "$BLK/$1"; }
+isblk() { if [ -n "$R9Q_TEST_BLK" ]; then [ -f "$1" ]; else [ -b "$1" ]; fi; }
+
+ui "Galaxy S21 FE (r9q) - Arch Linux ARM (dual boot with Android)"
+
+# 1. right phone, right place
+model=$(getprop ro.boot.em.model)
+[ "$model" = SM-G990B2 ] || abort "this ZIP is only for the SM-G990B2 (this one is '$model')"
+real=$(readlink -f "$ZIP" 2>/dev/null || echo "$ZIP")
+case "$real" in
+/data/* | /sdcard/* | /storage/emulated/* | /mnt/runtime/*)
+	abort "the ZIP is in Android's storage; put it on a USB drive or use adb sideload." ;;
+esac
+
+# 2. what is in the zip
+unzip -p "$ZIP" manifest.txt > /tmp/r9q-manifest 2>/dev/null || abort "manifest.txt not found in the ZIP"
+. /tmp/r9q-manifest
+[ "$MODE" = dual ] || abort "this ZIP is not the dual boot version"
+[ -n "$IMG_SIZE" ] && [ -n "$IMG_SHA256" ] && [ -n "$GZ_SHA256" ] || abort "manifest.txt is incomplete"
+ui "Edition: $EDITION   Build: $BUILD"
+ui "Kernel $KERNEL, $SYSTEM_SIZE"
+
+# 3. the dual boot layout must be there
+for p in linux esp boot param misc; do
+	isblk "$(part $p)" || abort "partition $p does not exist: split the storage first (ZIP r9q-dualboot-dividir)"
+done
+lx_size=$(blockdev --getsize64 "$(part linux)")
+[ "$IMG_SIZE" -le "$lx_size" ] || abort "the image ($IMG_SIZE) does not fit in linux ($lx_size)"
+# the selector of the dual boot kernel: without it nothing starts the UEFI menu
+sel=$(dd if="$(part boot)" bs=512 skip=8 count=1 2>/dev/null | tr -c 'A-Z0-9' '\n' | grep -c 'R9QDUALB')
+[ "$sel" -ge 1 ] || abort "boot does not have the dual kernel (UEFI menu): install Android's dual boot first"
+
+# 4. check everything before writing anything
+ui "Checking the ESP files..."
+E=/tmp/r9q-esp
+rm -rf "$E"; mkdir -p "$E"
+ESPFILES="esp/arch/Image esp/arch/initramfs.img esp/arch/r9q.dtb esp/loader/entries/arch.conf esp/EFI/BOOT/BOOTAA64.EFI"
+unzip -o -q -d "$E" "$ZIP" $ESPFILES esp.sha256 || abort "could not extract the ESP from the ZIP"
+(cd "$E" && sha256sum -c esp.sha256 >/dev/null 2>&1) || abort "the ESP files in the ZIP are damaged"
+ui "Checking the system (a few minutes)..."
+got=$(unzip -p "$ZIP" rootfs.img.gz | sha256sum | cut -d' ' -f1)
+[ "$got" = "$GZ_SHA256" ] || abort "rootfs.img.gz is damaged (SHA-256 differs). Copy the ZIP again."
+
+# 5. the system into the linux partition
+if [ -z "$R9Q_TEST_BLK" ]; then
+	while read -r dev mnt rest; do
+		[ "$(readlink -f "$dev")" = "$(readlink -f "$(part linux)")" ] && { umount "$mnt" 2>/dev/null || umount -l "$mnt"; }
+	done < /proc/mounts
+fi
+ui "Writing the system to the linux partition (several minutes, do not reboot)..."
+WROTE=1
+set -o pipefail
+if ! unzip -p "$ZIP" rootfs.img.gz | unpigz -c | dd of="$(part linux)" bs=4194304 2>/tmp/r9q-dd.log; then
+	abort "writing linux failed ($(tail -n1 /tmp/r9q-dd.log)). Android was not touched; install this ZIP again."
+fi
+sync
+ui "Verifying what was written..."
+got=$(head -c "$IMG_SIZE" "$(part linux)" | sha256sum | cut -d' ' -f1)
+[ "$got" = "$IMG_SHA256" ] || abort "verifying linux failed. Install this ZIP again."
+
+# 6. kernel, initramfs, DTB and the menu entry on the ESP
+ui "Writing Arch's boot files to the ESP..."
+if [ -n "$R9Q_TEST_ESP" ]; then
+	M=$R9Q_TEST_ESP
+else
+	M=/tmp/r9q-espmnt
+	mkdir -p "$M"
+	umount "$M" 2>/dev/null
+	mount -t vfat "$(part esp)" "$M" || abort "could not mount the ESP"
+fi
+mkdir -p "$M/arch" "$M/loader/entries" "$M/EFI/BOOT"
+for f in arch/Image arch/initramfs.img arch/r9q.dtb loader/entries/arch.conf EFI/BOOT/BOOTAA64.EFI; do
+	cp "$E/esp/$f" "$M/$f.new" && mv -f "$M/$f.new" "$M/$f" || abort "could not copy $f to the ESP"
+done
+printf 'timeout 5\ndefault arch.conf\nconsole-mode keep\n' > "$M/loader/loader.conf"
+sync
+(cd "$E/esp" && for f in arch/Image arch/initramfs.img arch/r9q.dtb loader/entries/arch.conf EFI/BOOT/BOOTAA64.EFI; do
+	[ "$(sha256sum "$f" | cut -d' ' -f1)" = "$(sha256sum "$M/$f" | cut -d' ' -f1)" ] || exit 1
+done) || abort "the ESP was not written correctly"
+[ -n "$R9Q_TEST_ESP" ] || umount "$M"
+
+# 7. normal boot next time
+dd if=/dev/zero of="$(part param)" bs=4 count=1 conv=notrunc 2>/dev/null
+dd if=/dev/zero of="$(part misc)" bs=4096 count=8 2>/dev/null
+sync
+rm -rf "$E" /tmp/r9q-manifest /tmp/r9q-dd.log
+
+ui "Done."
+ui "On reboot the menu shows: Arch Linux ARM (default, 5 s) or Android."
+ui "On the first boot Arch reboots once by itself (real MACs)."
+exit 0

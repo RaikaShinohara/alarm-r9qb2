@@ -1,0 +1,15 @@
+--- a/src/gpu_fdinfo.cpp
++++ b/src/gpu_fdinfo.cpp
+@@ -55,6 +55,12 @@
+                 client_id = val;
+         }
+ 
++        // The msm kernel driver reports "drm-driver: msm" in fdinfo, while the
++        // GPU found in sysfs is named after the platform driver, "msm_dpu":
++        // without this every fd is skipped and the GPU load stays at 0%.
++        if (driver == "msm" && module == "msm_dpu")
++            driver = module;
++
+         if (!driver.empty() && driver == module) {
+             total++;
+             SPDLOG_TRACE(

@@ -1,0 +1,101 @@
+# Reference: <https://postmarketos.org/devicepkg>
+# Maintainer: RaikaShinohara <321751277+RaikaShinohara@users.noreply.github.com>
+#
+# Bluetooth (QCA6490 on UART18) runs on the controller's ROM firmware: there
+# are no files in /usr/lib/firmware/qca on purpose. With a patch (Samsung's
+# or linux-firmware's hpbtfw21.tlv), LE connections fail with 0x3e, so do
+# not install linux-firmware-qca.
+pkgname=device-samsung-r9q
+pkgdesc="Samsung Galaxy S21 FE 5G (Snapdragon)"
+pkgver=1
+pkgrel=8
+url="https://postmarketos.org"
+license="MIT"
+arch="aarch64"
+options="!check !archcheck"
+depends="
+	android-tools
+	firmware-qcom-adreno-a660
+	firmware-samsung-r9q-adreno
+	firmware-samsung-r9q-adsp
+	firmware-samsung-r9q-audio
+	firmware-samsung-r9q-cdsp
+	firmware-samsung-r9q-hexagonfs
+	firmware-samsung-r9q-modem
+	firmware-samsung-r9q-slpi
+	firmware-samsung-r9q-wifi
+	hexagonrpcd
+	iio-sensor-proxy
+	libssc
+	rmtfs
+	soc-qcom
+	soc-qcom-modem
+	linux-samsung-r9q
+	postmarketos-base
+"
+makedepends="devicepkg-dev"
+source="
+	81-libssc-samsung-r9q.rules
+	bootmac-bluetooth-samsung-r9q.conf
+	deviceinfo
+	fastfetch-config.jsonc
+	iio-sensor-proxy-samsung-r9q.conf
+	kwinrc
+	modprobe-samsung-r9q.conf
+	msm-modem-uim-selection-samsung-r9q.conf
+	plasmaparc
+	rmtfs-no-modem-autostart.conf
+	ucm-HiFi.conf
+	ucm-Samsung-Galaxy-S21-FE.conf
+"
+
+build() {
+	devicepkg_build $startdir $pkgname
+}
+
+package() {
+	devicepkg_package $startdir $pkgname
+	install -Dm644 "$srcdir"/modprobe-samsung-r9q.conf \
+		"$pkgdir"/usr/lib/modprobe.d/samsung-r9q.conf
+	install -Dm644 "$srcdir"/fastfetch-config.jsonc \
+		"$pkgdir"/etc/xdg/fastfetch/config.jsonc
+	install -Dm644 "$srcdir"/81-libssc-samsung-r9q.rules \
+		"$pkgdir"/usr/lib/udev/rules.d/81-libssc-samsung-r9q.rules
+	install -Dm644 "$srcdir"/rmtfs-no-modem-autostart.conf \
+		"$pkgdir"/usr/lib/systemd/system/rmtfs.service.d/10-samsung-r9q.conf
+	install -Dm644 "$srcdir"/msm-modem-uim-selection-samsung-r9q.conf \
+		"$pkgdir"/usr/lib/systemd/system/msm-modem-uim-selection.service.d/10-samsung-r9q.conf
+	install -Dm644 "$srcdir"/iio-sensor-proxy-samsung-r9q.conf \
+		"$pkgdir"/usr/lib/systemd/system/iio-sensor-proxy.service.d/10-samsung-r9q.conf
+	install -Dm644 "$srcdir"/bootmac-bluetooth-samsung-r9q.conf \
+		"$pkgdir"/usr/lib/systemd/system/bootmac@bluetooth.service.d/10-samsung-r9q.conf
+
+	# Speakers: sound card "Samsung-Galaxy-S21-FE" (driver sm8350)
+	install -Dm644 "$srcdir"/ucm-Samsung-Galaxy-S21-FE.conf \
+		"$pkgdir"/usr/share/alsa/ucm2/conf.d/sm8350/Samsung-Galaxy-S21-FE.conf
+	install -Dm644 "$srcdir"/ucm-HiFi.conf \
+		"$pkgdir"/usr/share/alsa/ucm2/Samsung/r9q/HiFi.conf
+
+	install -Dm644 "$srcdir"/kwinrc "$pkgdir"/etc/xdg/kwinrc
+
+	# The ABL forces console=null, so systemd-firstboot always fails with
+	# 208/STDIN ("degraded" system); pmbootstrap already sets locale/user.
+	mkdir -p "$pkgdir"/etc/systemd/system
+	ln -s /dev/null "$pkgdir"/etc/systemd/system/systemd-firstboot.service
+	install -Dm644 "$srcdir"/plasmaparc "$pkgdir"/etc/xdg/plasmaparc
+}
+
+sha512sums="
+8e2d9973d76128bfb08232a09283f3525925376d531cda12834084fb6c5cb79d5802a52ac0a1583298739402aa0bcd5a5cf30e4ff4a81819a57e54fffe7f9084  81-libssc-samsung-r9q.rules
+325e7bf85ad942ca0cead6b59542e8557913caa4a35e22e097ca2836d617f37e828ddb6c914577971146171fc2a1613b3936e8b8380dd57b5702410b02bb6e2d  bootmac-bluetooth-samsung-r9q.conf
+5096c91c8cc527f99f1f61e80ef7d972650aaceaeb8044283e01be3b0e84e62aedcb396814676ba0be36f2298a061b6befff6a27468e85856847180a3e636e33  deviceinfo
+3f1f988ca6864532bdc31fa433382e767113ccf42bc3f59eb54c783d65a639479dd864492828a0b8c356ad2724b85535115ec0096a0fb0151db7d69bb74abacd  fastfetch-config.jsonc
+03cd79ae3eae50dbfb3685f7762dd698e457e38ee6a9eeeb90bd96387f5ada4b839e2723a257351322054e5589a8b56076739713dcddd248002dd05cc8d943a1  iio-sensor-proxy-samsung-r9q.conf
+5a2d9bfd4ae75ab2c90b785131b774e4837dc8fc8929a75d3f1ebddab05b9f4884689cb2af3ecd2ccf624074304f986d8fdc0ccd3cb04d29a4fd33b4ee59ff5e  kwinrc
+0f33fdf55c851a4ab7a199abc50efac3ac7175e0c1b9a672d34c37428e647ceb975de4e638ac2a202f56d276e0db0d99370d70468185cfa65bd98973739d8aa7  modprobe-samsung-r9q.conf
+cabd16deea3abf3d1790fc4e73a44d4ea96ee4b268982ebe3cded2dfd71056c1f3e94bb67185afe212b95d1250c993a01e3acc11884c272d5b17592b05ab59eb  msm-modem-uim-selection-samsung-r9q.conf
+3303ec17c3b02aa22dc4a1d54560c2cebd93c21d7d5c3c53a039e42934531b1e9e59f3c72a51405b57e28573f3e94b1aa061287fa4dd6c577b7d59390858967d  plasmaparc
+1609ed5f70ee92b397dfa9985622bb2a2d5086b6895f238400457cc0cea9e554478c988da57d1f5fd9e817b34b0c1e6fcd2a193d5892391aa933d8d8b14f3c5c  rmtfs-no-modem-autostart.conf
+0db343dd674bef71e45ba2ca529306a91eb94700272aac0579231ad84f05a47b43cfd82b4c25198a98d429d3090858a52dfb6d95fb3eab538fbe1c42c24e0596  ucm-HiFi.conf
+bfa86f6938a46791662883b5617e462b272a0a34ab523250956738497fa7ea5fcb47359a65184c59855b8318ff0dc1f916beff5409de1ba97bc52eff1e6aab65  ucm-Samsung-Galaxy-S21-FE.conf
+"

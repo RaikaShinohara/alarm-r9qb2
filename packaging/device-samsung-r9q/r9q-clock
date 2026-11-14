@@ -1,0 +1,46 @@
+#!/bin/sh
+# The PMIC RTC (rtc-pm8xxx) keeps counting while the phone is off, but only
+# since its last reset (it read 1970-04-17) and Linux does not set it here:
+# Android keeps an offset to it. Do the same with /var/lib/r9q/rtc-offset
+# ("real time - RTC time", in seconds).
+#   restore: at boot, set the clock to RTC + offset, or at least to the
+#            package build time (/usr/lib/clock-epoch; systemd only applies
+#            that file in the initramfs, which does not contain it)
+#   save:    store the offset; run after NTP syncs, at shutdown, and by
+#            scripts/update-phone.sh right after it sets the PC's time
+set -eu
+RTC=/sys/class/rtc/rtc0/since_epoch
+F=/var/lib/r9q/rtc-offset
+floor=$(stat -c %Y /usr/lib/clock-epoch 2>/dev/null || echo 0)
+now=$(date -u +%s)
+
+case "${1:-}" in
+restore)
+	t=$floor
+	if [ -r "$F" ] && [ -r "$RTC" ]; then
+		o=$(cat "$F")
+		r=$(cat "$RTC")
+		[ $((r + o)) -gt "$t" ] && t=$((r + o))
+	fi
+	if [ "$now" -lt "$t" ]; then
+		date -u -s "@$t" >/dev/null
+		echo "clock set to $(date -u '+%F %T') UTC (was $(date -u -d "@$now" '+%F %T'))"
+	fi
+	;;
+save)
+	# never store an offset taken from an unset clock
+	if [ "$now" -lt "$floor" ]; then
+		echo "clock not set, offset not saved"
+		exit 0
+	fi
+	[ -r "$RTC" ] || exit 0
+	mkdir -p "${F%/*}"
+	echo $((now - $(cat "$RTC"))) > "$F.new"
+	mv "$F.new" "$F"
+	echo "RTC offset saved"
+	;;
+*)
+	echo "usage: $0 restore|save" >&2
+	exit 2
+	;;
+esac

@@ -1,0 +1,1878 @@
+// SPDX-License-Identifier: BSD-3-Clause
+/*
+ * Samsung Galaxy S21 FE 5G (SM-G990B2 / SM-G990B / SM-G990E / SM-G990U), "r9q"
+ *
+ * Bring-up: EA8082 DSI panel (simplefb until msm takes over), Adreno 660, USB 2.0
+ * peripheral (for pmOS USB networking), buttons, PMIC RTC, UFS.
+ *
+ * Values in this file were taken from the stock vendor_boot DTB (lahaina v2.1)
+ * merged with the board overlay "Samsung R9Q PROJECT (board-id,14)".
+ */
+
+/dts-v1/;
+
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/input/input.h>
+#include <dt-bindings/interconnect/qcom,osm-l3.h>
+#include <dt-bindings/pinctrl/qcom,pmic-gpio.h>
+#include <dt-bindings/regulator/qcom,rpmh-regulator.h>
+#include <dt-bindings/usb/pd.h>
+#include "sm8350.dtsi"
+#include "pm8350.dtsi"
+#include "pm8350c.dtsi"
+#include "pmk8350.dtsi"
+#include "pmr735a.dtsi"
+#include "pmr735b.dtsi"
+
+/ {
+	model = "Samsung Galaxy S21 FE 5G";
+	/*
+	 * Samsung's ABL selects the SoC DTB from vendor_boot using the legacy
+	 * Qualcomm compatibles plus msm-id/board-id. Without them it reports
+	 * "No match found for Soc Dtb type" and drops to download mode.
+	 */
+	compatible = "samsung,r9q", "qcom,sm8350", "qcom,lahaina-mtp", "qcom,lahaina", "qcom,mtp";
+	chassis-type = "handset";
+
+	qcom,msm-id = <0x19f 0x20001>, <0x1c8 0x20001>, <0x1f5 0x20001>;
+	qcom,board-id = <0x10008 0x0e>;
+
+	aliases {
+		serial1 = &uart18;
+	};
+
+	chosen {
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+
+		framebuffer: framebuffer@e4000000 {
+			compatible = "simple-framebuffer";
+			reg = <0x0 0xe4000000 0x0 0x2300000>;
+			width = <1080>;
+			height = <2340>;
+			stride = <(1080 * 4)>;
+			format = "a8r8g8b8";
+			/*
+			 * Early console on the bootloader splash until the msm DRM
+			 * driver takes over; keep its clocks and MMCX rail meanwhile.
+			 */
+			clocks = <&gcc GCC_DISP_HF_AXI_CLK>,
+				 <&gcc GCC_DISP_SF_AXI_CLK>;
+			/* Keep the MMCX rail (parent of MDSS_GDSC) voted at NOM */
+			power-domains = <&rpmhpd RPMHPD_MMCX>;
+			required-opps = <&rpmhpd_opp_nom>;
+		};
+	};
+
+	gpio-keys {
+		compatible = "gpio-keys";
+
+		pinctrl-0 = <&vol_up_n>;
+		pinctrl-names = "default";
+
+		key-vol-up {
+			label = "Volume Up";
+			linux,code = <KEY_VOLUMEUP>;
+			gpios = <&pm8350_gpios 6 GPIO_ACTIVE_LOW>;
+			debounce-interval = <15>;
+			linux,can-disable;
+			wakeup-source;
+		};
+	};
+
+	/* Panel VCI (3.0 V) load switch, stock "fixed_regulator@0" (panel_vci) */
+	panel_vci: regulator-panel-vci {
+		compatible = "regulator-fixed";
+		regulator-name = "panel_vci";
+		regulator-min-microvolt = <3000000>;
+		regulator-max-microvolt = <3000000>;
+
+		gpio = <&tlmm 166 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		/* Left on by the bootloader for the splash screen */
+		regulator-boot-on;
+
+		vin-supply = <&vph_pwr>;
+
+		pinctrl-0 = <&panel_vci_en>;
+		pinctrl-names = "default";
+	};
+
+	/* Touchscreen supply load switch, stock "fixed_regulator@3" (tsp_io_ldo) */
+	vreg_tsp_io: regulator-tsp-io {
+		compatible = "regulator-fixed";
+		regulator-name = "tsp_io";
+
+		gpio = <&tlmm 50 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+
+		vin-supply = <&vph_pwr>;
+
+		pinctrl-0 = <&tsp_io_en>;
+		pinctrl-names = "default";
+	};
+
+	vph_pwr: regulator-vph-pwr {
+		compatible = "regulator-fixed";
+		regulator-name = "vph_pwr";
+		regulator-min-microvolt = <3700000>;
+		regulator-max-microvolt = <3700000>;
+		regulator-always-on;
+		regulator-boot-on;
+	};
+
+	/*
+	 * Vibration motor power switch: stock drives GPIO198 high from the
+	 * max77705_vibrator pinctrl (vib_power_default / vib_power_sleep).
+	 */
+	vib_power: regulator-vib-power {
+		compatible = "regulator-fixed";
+		regulator-name = "vib_power";
+
+		gpio = <&tlmm 198 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+
+		pinctrl-0 = <&vib_power_en>;
+		pinctrl-names = "default";
+	};
+
+	/*
+	 * Speakers: MultiMedia1 (q6asm) routed by q6adm to primary MI2S, where
+	 * the two CS35L41 take the left (top) and right (bottom) I2S slots.
+	 * Microphones: the DMICs through the LPASS VA macro into MultiMedia3.
+	 */
+	sound {
+		compatible = "samsung,r9q-sndcard";
+		model = "Samsung-Galaxy-S21-FE";
+
+		pinctrl-0 = <&pri_mi2s_active>;
+		pinctrl-names = "default";
+
+		mm1-dai-link {
+			link-name = "MultiMedia1";
+
+			cpu {
+				sound-dai = <&q6asmdai MSM_FRONTEND_DAI_MULTIMEDIA1>;
+			};
+		};
+
+		mm2-dai-link {
+			link-name = "MultiMedia2";
+
+			cpu {
+				sound-dai = <&q6asmdai MSM_FRONTEND_DAI_MULTIMEDIA2>;
+			};
+		};
+
+		speaker-dai-link {
+			link-name = "Speaker Playback";
+
+			cpu {
+				sound-dai = <&q6afedai PRIMARY_MI2S_RX>;
+			};
+
+			platform {
+				sound-dai = <&q6routing>;
+			};
+
+			codec {
+				sound-dai = <&cs35l41_top 0>, <&cs35l41_bottom 0>;
+			};
+		};
+
+		/* Microphones: VA macro -> VA_CODEC_DMA_TX_0 -> MultiMedia3 */
+		mm3-dai-link {
+			link-name = "MultiMedia3";
+
+			cpu {
+				sound-dai = <&q6asmdai MSM_FRONTEND_DAI_MULTIMEDIA3>;
+			};
+		};
+
+		va-dai-link {
+			link-name = "VA Capture";
+
+			cpu {
+				sound-dai = <&q6afedai VA_CODEC_DMA_TX_0>;
+			};
+
+			platform {
+				sound-dai = <&q6routing>;
+			};
+
+			codec {
+				sound-dai = <&vamacro 0>;
+			};
+		};
+	};
+
+	/* Vibration motor PWM, stock samsung_pwm_gpclk (GCC GP2 on GPIO116) */
+	vib_pwm: pwm {
+		compatible = "clk-pwm";
+		#pwm-cells = <2>;
+
+		clocks = <&gcc GCC_GP2_CLK>;
+		assigned-clocks = <&gcc GCC_GP2_CLK_SRC>;
+		assigned-clock-parents = <&rpmhcc RPMH_CXO_CLK>;
+
+		pinctrl-0 = <&motor_pwm_active>;
+		pinctrl-1 = <&motor_pwm_suspend>;
+		pinctrl-names = "default", "sleep";
+	};
+
+	/*
+	 * Analog switch between the connector's SBU pins and the DP AUX lines.
+	 * Stock drives it from its DP driver: enable GPIO16 (sde_dp_aux_en,
+	 * high = off when idle), select GPIO15 (sde_dp_aux_sel, 1 for CC2).
+	 * The part is not named in the stock DT (its fsa4480 node is disabled).
+	 */
+	usb-sbu-mux {
+		compatible = "gpio-sbu-mux";
+
+		enable-gpios = <&tlmm 16 GPIO_ACTIVE_LOW>;
+		select-gpios = <&tlmm 15 GPIO_ACTIVE_HIGH>;
+
+		pinctrl-0 = <&dp_aux_en>, <&dp_aux_sel>;
+		pinctrl-names = "default";
+
+		mode-switch;
+		orientation-switch;
+
+		port {
+			usb_sbu_mux: endpoint {
+				remote-endpoint = <&max77705_typec_sbu>;
+			};
+		};
+	};
+
+	/*
+	 * QCA6490 (WCN6855 family) Wi-Fi/BT combo on PCIe0. Supplies and GPIOs
+	 * from the stock "qcom,cnss-qca6490" node: aon pmr735a_s2, dig
+	 * pm8350_s11, io pm8350_s10, rfa1 pm8350c_s1, rfa2 pm8350_s12;
+	 * wlan-en GPIO64, bt-en GPIO65, sw-ctrl GPIO153.
+	 */
+	wcn6855-pmu {
+		compatible = "qcom,wcn6855-pmu";
+
+		pinctrl-0 = <&bt_en>, <&wlan_en>, <&wlan_sw_ctrl>;
+		pinctrl-names = "default";
+
+		wlan-enable-gpios = <&tlmm 64 GPIO_ACTIVE_HIGH>;
+		bt-enable-gpios = <&tlmm 65 GPIO_ACTIVE_HIGH>;
+		swctrl-gpios = <&tlmm 153 GPIO_ACTIVE_HIGH>;
+
+		vddio-supply = <&vreg_s10b_1p8>;
+		vddaon-supply = <&vreg_s2e_1p01>;
+		vddpmu-supply = <&vreg_s12b_1p25>;
+		vddpmumx-supply = <&vreg_s2e_1p01>;
+		vddpmucx-supply = <&vreg_s11b_0p95>;
+		vddrfa0p95-supply = <&vreg_s11b_0p95>;
+		vddrfa1p3-supply = <&vreg_s12b_1p25>;
+		vddrfa1p9-supply = <&vreg_s1c_1p86>;
+		vddpcie1p3-supply = <&vreg_s12b_1p25>;
+		vddpcie1p9-supply = <&vreg_s1c_1p86>;
+
+		regulators {
+			vreg_pmu_rfa_cmn_0p8: ldo0 {
+				regulator-name = "vreg_pmu_rfa_cmn_0p8";
+			};
+
+			vreg_pmu_aon_0p8: ldo1 {
+				regulator-name = "vreg_pmu_aon_0p8";
+			};
+
+			vreg_pmu_wlcx_0p8: ldo2 {
+				regulator-name = "vreg_pmu_wlcx_0p8";
+			};
+
+			vreg_pmu_wlmx_0p8: ldo3 {
+				regulator-name = "vreg_pmu_wlmx_0p8";
+			};
+
+			vreg_pmu_btcmx_0p8: ldo4 {
+				regulator-name = "vreg_pmu_btcmx_0p8";
+			};
+
+			vreg_pmu_pcie_1p8: ldo5 {
+				regulator-name = "vreg_pmu_pcie_1p8";
+			};
+
+			vreg_pmu_pcie_0p9: ldo6 {
+				regulator-name = "vreg_pmu_pcie_0p9";
+			};
+
+			vreg_pmu_rfa_0p8: ldo7 {
+				regulator-name = "vreg_pmu_rfa_0p8";
+			};
+
+			vreg_pmu_rfa_1p2: ldo8 {
+				regulator-name = "vreg_pmu_rfa_1p2";
+			};
+
+			vreg_pmu_rfa_1p7: ldo9 {
+				regulator-name = "vreg_pmu_rfa_1p7";
+			};
+		};
+	};
+
+	/*
+	 * 4500 mAh Li-ion. Samsung charges to 4.42 V (chg_float_voltage); keep a
+	 * conservative 4.35 V while there is no thermal/swelling management.
+	 */
+	battery: battery {
+		compatible = "simple-battery";
+		charge-full-design-microamp-hours = <4500000>;
+		voltage-min-design-microvolt = <3400000>;
+		voltage-max-design-microvolt = <4350000>;
+	};
+
+	reserved-memory {
+		/*
+		 * The bootloader keeps the display pipeline running only when
+		 * this region exists with this exact name, as in the stock DT.
+		 */
+		/*
+		 * MDSS keeps scanning out the splash until the DPU driver takes
+		 * over, so the SMMU logs ~10 harmless context faults (SID 0x820 /
+		 * 0xc20, iova 0xe46xxxxx) at boot. iommu-addresses on this node
+		 * does not help: arm-smmu fails to set up the direct mapping.
+		 */
+		splash_region {
+			reg = <0x0 0xe4000000 0x0 0x2300000>;
+			label = "cont_splash_region";
+			no-map;
+		};
+
+		dfps_data_region {
+			reg = <0x0 0xe6300000 0x0 0x100000>;
+			label = "dfps_data_region";
+			no-map;
+		};
+
+		/* Samsung specific carve-outs (secure world / bootloader) */
+		hdm_region@9fb00000 {
+			reg = <0x0 0x9fb00000 0x0 0x1000>;
+			no-map;
+		};
+
+		kaslr_region@a0001000 {
+			reg = <0x0 0xa0001000 0x0 0x1000>;
+			no-map;
+		};
+
+		tima_region@b0100000 {
+			reg = <0x0 0xb0100000 0x0 0x100000>;
+			no-map;
+		};
+
+		sec_debug_region@f0000000 {
+			reg = <0x0 0xf0000000 0x0 0x200000>;
+			no-map;
+		};
+
+		/*
+		 * Samsung sec_log_buf ("sec_log=0x200000@0xF0200000"): shared by
+		 * XBL/ABL and the downstream kernel. The bring-up console writes
+		 * here; TWRP shows it as /proc/last_kmsg after a reset.
+		 */
+		sec_log_buf: sec_log_buf@f0200000 {
+			compatible = "samsung,sec-log-buf";
+			reg = <0x0 0xf0200000 0x0 0x200000>;
+			no-map;
+		};
+
+		sec_debug_region@f0400000 {
+			reg = <0x0 0xf0400000 0x0 0x500000>;
+			no-map;
+		};
+
+		ss_plog@f0900000 {
+			reg = <0x0 0xf0900000 0x0 0x200000>;
+			no-map;
+		};
+
+		/* Same region the stock kernel uses: survives a warm reboot */
+		ramoops@f0b00000 {
+			compatible = "ramoops";
+			reg = <0x0 0xf0b00000 0x0 0x100000>;
+			record-size = <0x40000>;
+			console-size = <0x40000>;
+			pmsg-size = <0x40000>;
+			ftrace-size = <0x40000>;
+			no-map;
+		};
+	};
+};
+
+/* Samsung moved most PIL regions compared to the Qualcomm reference layout */
+&cdsp_secure_heap {
+	reg = <0x0 0x80c00000 0x0 0x600000>;
+};
+
+&pil_adsp_mem {
+	reg = <0x0 0x85200000 0x0 0x3000000>;
+};
+
+&pil_spss_mem {
+	reg = <0x0 0x8b51c000 0x0 0x100000>;
+};
+
+&pil_modem_mem {
+	reg = <0x0 0x8b800000 0x0 0xf600000>;
+};
+
+&pil_camera_mem {
+	reg = <0x0 0x9b800000 0x0 0x500000>;
+};
+
+&pil_video_mem {
+	reg = <0x0 0x9bd00000 0x0 0x500000>;
+};
+
+&pil_cvp_mem {
+	reg = <0x0 0x9c200000 0x0 0x500000>;
+};
+
+&pil_slpi_mem {
+	reg = <0x0 0x9c700000 0x0 0x1600000>;
+};
+
+&removed_mem {
+	reg = <0x0 0xd8800000 0x0 0x7d00000>;
+};
+
+/*
+ * The reference rmtfs address (0x9b800000) is pil_camera on this device; the
+ * stock kernel allocates the 2.5 MiB rmtfs buffer dynamically ("qcom,
+ * sharedmem-uio", client-id 1) and hands it to the modem, which learns the
+ * address over QMI. Do the same with a dynamic reservation below 4 GiB.
+ */
+/delete-node/ &rmtfs_mem;
+
+&{/reserved-memory} {
+	rmtfs_mem: rmtfs-region {
+		compatible = "qcom,rmtfs-mem";
+		size = <0x0 0x280000>;
+		alignment = <0x0 0x100000>;
+		alloc-ranges = <0x0 0x80000000 0x0 0x80000000>;
+		no-map;
+
+		qcom,client-id = <1>;
+		qcom,vmid = <QCOM_SCM_VMID_MSS_MSA>;
+	};
+};
+
+/*
+ * DSPs, booted through TrustZone (PAS) with the stock signed firmware, merged
+ * from the NON-HLOS / modem partition .mdt+.bNN files (scripts/squash-mdt.py).
+ * Load spans match the Samsung PIL regions above (adsp 48 MiB, cdsp 30 MiB,
+ * slpi 22 MiB, modem 246 MiB).
+ */
+&adsp {
+	firmware-name = "qcom/sm8350/samsung/r9q/adsp.mbn";
+	status = "okay";
+};
+
+&cdsp {
+	firmware-name = "qcom/sm8350/samsung/r9q/cdsp.mbn";
+	status = "okay";
+};
+
+&mpss {
+	firmware-name = "qcom/sm8350/samsung/r9q/modem.mbn";
+	status = "okay";
+};
+
+&slpi {
+	firmware-name = "qcom/sm8350/samsung/r9q/slpi.mbn";
+
+	/* Proximity sensor interrupt line read by the SSC (stock proxy_int) */
+	pinctrl-0 = <&ssc_proxy_int>;
+	pinctrl-names = "default";
+
+	status = "okay";
+};
+
+&apps_rsc {
+	regulators-0 {
+		compatible = "qcom,pm8350-rpmh-regulators";
+		qcom,pmic-id = "b";
+
+		vdd-s1-supply = <&vph_pwr>;
+		vdd-s2-supply = <&vph_pwr>;
+		vdd-s3-supply = <&vph_pwr>;
+		vdd-s4-supply = <&vph_pwr>;
+		vdd-s5-supply = <&vph_pwr>;
+		vdd-s6-supply = <&vph_pwr>;
+		vdd-s7-supply = <&vph_pwr>;
+		vdd-s8-supply = <&vph_pwr>;
+		vdd-s9-supply = <&vph_pwr>;
+		vdd-s10-supply = <&vph_pwr>;
+		vdd-s11-supply = <&vph_pwr>;
+		vdd-s12-supply = <&vph_pwr>;
+
+		vdd-l1-l4-supply = <&vreg_s11b_0p95>;
+		vdd-l2-l7-supply = <&vreg_bob>;
+		vdd-l3-l5-supply = <&vreg_bob>;
+		vdd-l6-l9-l10-supply = <&vreg_s11b_0p95>;
+
+		vreg_s10b_1p8: smps10 {
+			regulator-name = "vreg_s10b_1p8";
+			regulator-min-microvolt = <1800000>;
+			regulator-max-microvolt = <1800000>;
+		};
+
+		vreg_s11b_0p95: smps11 {
+			regulator-name = "vreg_s11b_0p95";
+			regulator-min-microvolt = <752000>;
+			regulator-max-microvolt = <1012000>;
+		};
+
+		vreg_s12b_1p25: smps12 {
+			regulator-name = "vreg_s12b_1p25";
+			regulator-min-microvolt = <1224000>;
+			regulator-max-microvolt = <1360000>;
+		};
+
+		vreg_l1b_0p91: ldo1 {
+			regulator-name = "vreg_l1b_0p91";
+			regulator-min-microvolt = <912000>;
+			regulator-max-microvolt = <920000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+
+		vreg_l2b_3p07: ldo2 {
+			regulator-name = "vreg_l2b_3p07";
+			regulator-min-microvolt = <3072000>;
+			regulator-max-microvolt = <3072000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+
+		vreg_l3b_0p9: ldo3 {
+			regulator-name = "vreg_l3b_0p9";
+			regulator-min-microvolt = <904000>;
+			regulator-max-microvolt = <904000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+
+		vreg_l5b_0p88: ldo5 {
+			regulator-name = "vreg_l5b_0p88";
+			regulator-min-microvolt = <880000>;
+			regulator-max-microvolt = <888000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+
+		vreg_l6b_1p2: ldo6 {
+			regulator-name = "vreg_l6b_1p2";
+			regulator-min-microvolt = <1200000>;
+			regulator-max-microvolt = <1208000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+
+		vreg_l7b_2p96: ldo7 {
+			regulator-name = "vreg_l7b_2p96";
+			regulator-min-microvolt = <2400000>;
+			regulator-max-microvolt = <3008000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+
+		vreg_l9b_1p2: ldo9 {
+			regulator-name = "vreg_l9b_1p2";
+			regulator-min-microvolt = <1200000>;
+			regulator-max-microvolt = <1200000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+	};
+
+	regulators-1 {
+		compatible = "qcom,pm8350c-rpmh-regulators";
+		qcom,pmic-id = "c";
+
+		vdd-s1-supply = <&vph_pwr>;
+		vdd-s2-supply = <&vph_pwr>;
+		vdd-s3-supply = <&vph_pwr>;
+		vdd-s4-supply = <&vph_pwr>;
+		vdd-s5-supply = <&vph_pwr>;
+		vdd-s6-supply = <&vph_pwr>;
+		vdd-s7-supply = <&vph_pwr>;
+		vdd-s8-supply = <&vph_pwr>;
+		vdd-s9-supply = <&vph_pwr>;
+		vdd-s10-supply = <&vph_pwr>;
+
+		vdd-l1-l12-supply = <&vreg_s1c_1p86>;
+		vdd-l2-l8-supply = <&vreg_s1c_1p86>;
+		vdd-l3-l4-l5-l7-l13-supply = <&vreg_bob>;
+		vdd-l6-l9-l11-supply = <&vreg_bob>;
+		vdd-l10-supply = <&vreg_s12b_1p25>;
+
+		vdd-bob-supply = <&vph_pwr>;
+
+		vreg_s1c_1p86: smps1 {
+			regulator-name = "vreg_s1c_1p86";
+			regulator-min-microvolt = <1984000>;
+			regulator-max-microvolt = <1984000>;
+		};
+
+		vreg_s10c_1p05: smps10 {
+			regulator-name = "vreg_s10c_1p05";
+			regulator-min-microvolt = <1048000>;
+			regulator-max-microvolt = <1128000>;
+		};
+
+		vreg_bob: bob {
+			regulator-name = "vreg_bob";
+			regulator-min-microvolt = <3008000>;
+			regulator-max-microvolt = <3960000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_AUTO>;
+		};
+
+		vreg_l1c_1p8: ldo1 {
+			regulator-name = "vreg_l1c_1p8";
+			regulator-min-microvolt = <1800000>;
+			regulator-max-microvolt = <1800000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+
+		/*
+		 * Sensor rail behind the SLPI (stock "sensor_vdd", turned on by the
+		 * downstream PIL driver before booting the SLPI). Without it the
+		 * SSC sensor threads hang and the SLPI crashes every ~15 s.
+		 */
+		vreg_l2c_1p8: ldo2 {
+			regulator-name = "vreg_l2c_1p8";
+			regulator-min-microvolt = <1800000>;
+			regulator-max-microvolt = <1800000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+			regulator-always-on;
+			regulator-boot-on;
+		};
+
+		vreg_l3c_1p8: ldo3 {
+			regulator-name = "vreg_l3c_1p8";
+			regulator-min-microvolt = <1800000>;
+			regulator-max-microvolt = <1800000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+
+		/*
+		 * Always on in the stock DT (3.3 V there). PMIC5 PLDO uses 8 mV
+		 * steps: 3.300 V is not representable and makes the whole PM8350C
+		 * regulator group fail to probe (-EINVAL), so use 3.304 V.
+		 */
+		vreg_l7c_3p3: ldo7 {
+			regulator-name = "vreg_l7c_3p3";
+			regulator-min-microvolt = <3304000>;
+			regulator-max-microvolt = <3304000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+			regulator-always-on;
+		};
+
+		/* Display VDDI, left on by the bootloader */
+		vreg_l8c_1p8: ldo8 {
+			regulator-name = "vreg_l8c_1p8";
+			regulator-min-microvolt = <1800000>;
+			regulator-max-microvolt = <1800000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+			regulator-boot-on;
+			regulator-always-on;
+		};
+
+		vreg_l9c_3p0: ldo9 {
+			regulator-name = "vreg_l9c_3p0";
+			regulator-min-microvolt = <3000000>;
+			regulator-max-microvolt = <3000000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+			regulator-always-on;
+		};
+
+		/* Touchscreen VDD (stock "tsp_avdd_ldo") */
+		vreg_l11c_1p8: ldo11 {
+			regulator-name = "vreg_l11c_1p8";
+			regulator-min-microvolt = <1800000>;
+			regulator-max-microvolt = <1800000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+		};
+
+		vreg_l12c_1p8: ldo12 {
+			regulator-name = "vreg_l12c_1p8";
+			regulator-min-microvolt = <1800000>;
+			regulator-max-microvolt = <2000000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+			regulator-always-on;
+		};
+	};
+
+	regulators-2 {
+		compatible = "qcom,pmr735a-rpmh-regulators";
+		qcom,pmic-id = "e";
+
+		vdd-s1-supply = <&vph_pwr>;
+		vdd-s2-supply = <&vph_pwr>;
+		vdd-s3-supply = <&vph_pwr>;
+
+		vdd-l1-l2-supply = <&vreg_s2e_1p01>;
+		vdd-l7-bob-supply = <&vreg_bob>;
+
+		/* WLAN AON (stock: pmr735a_s2 at 1.012 V) */
+		vreg_s2e_1p01: smps2 {
+			regulator-name = "vreg_s2e_1p01";
+			regulator-min-microvolt = <1012000>;
+			regulator-max-microvolt = <1020000>;
+		};
+
+		/* WLAN antenna switch (stock: pmr735a_l7, 2.8 V, enabled by cnss) */
+		vreg_l7e_2p8: ldo7 {
+			regulator-name = "vreg_l7e_2p8";
+			regulator-min-microvolt = <2800000>;
+			regulator-max-microvolt = <2800000>;
+			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+			regulator-always-on;
+		};
+	};
+};
+
+/*
+ * LPASS LPI pins: the digital microphones, one per DMIC clock/data pair
+ * (stock cdc_dmic01/23/45: 2 mA, no pull while active). Stock routes
+ * DMIC1, DMIC3 and DMIC5 (the second slot of each pair) as main, sub and
+ * third mic.
+ */
+&lpass_tlmm {
+	dmic01_default: dmic01-default-state {
+		clk-pins {
+			pins = "gpio6";
+			function = "dmic1_clk";
+			drive-strength = <2>;
+			bias-disable;
+		};
+
+		data-pins {
+			pins = "gpio7";
+			function = "dmic1_data";
+			drive-strength = <2>;
+			bias-disable;
+		};
+	};
+
+	dmic23_default: dmic23-default-state {
+		clk-pins {
+			pins = "gpio8";
+			function = "dmic2_clk";
+			drive-strength = <2>;
+			bias-disable;
+		};
+
+		data-pins {
+			pins = "gpio9";
+			function = "dmic2_data";
+			drive-strength = <2>;
+			bias-disable;
+		};
+	};
+
+	dmic45_default: dmic45-default-state {
+		clk-pins {
+			pins = "gpio12";
+			function = "dmic3_clk";
+			drive-strength = <2>;
+			bias-disable;
+		};
+
+		data-pins {
+			pins = "gpio13";
+			function = "dmic3_data";
+			drive-strength = <2>;
+			bias-disable;
+		};
+	};
+};
+
+&soc {
+	/*
+	 * EPSS L3 cache frequency (stock: qcom,lahaina-epss-l3-cpu, same block
+	 * and LUT at +0x100; mainline drives it through the L3 perf state at
+	 * +0x320 like SM8250/SC7280). Without it nothing votes for the L3,
+	 * which stayed at a low clock (2 MB copies barely faster than RAM).
+	 */
+	epss_l3: interconnect@18590000 {
+		compatible = "qcom,sm8350-epss-l3", "qcom,sm8250-epss-l3";
+		reg = <0 0x18590000 0 0x1000>;
+		clocks = <&rpmhcc RPMH_CXO_CLK>, <&gcc GCC_GPLL0>;
+		clock-names = "xo", "alternate";
+		#interconnect-cells = <1>;
+	};
+
+	/*
+	 * VA macro of the LPASS digital codec. Stock records through the TX
+	 * macro, but the DMIC clock generators live in this block (downstream
+	 * tx_macro writes VA_TOP_CSR_DMICn_CTL), and only the mainline VA macro
+	 * drives them. Samsung's voice wake-up uses this same path
+	 * (VA DMIC MUX0 = DMIC1, VA_CDC_DMA_TX_0). Clocked from the TX core
+	 * clock like on SM8250 (stock va-clk-mux-select / default-clk-id 0).
+	 */
+	vamacro: codec@3370000 {
+		compatible = "qcom,sm8250-lpass-va-macro";
+		reg = <0 0x03370000 0 0x1000>;
+		clocks = <&q6afecc LPASS_CLK_ID_TX_CORE_MCLK LPASS_CLK_ATTRIBUTE_COUPLE_NO>,
+			 <&q6afecc LPASS_HW_MACRO_VOTE LPASS_CLK_ATTRIBUTE_COUPLE_NO>,
+			 <&q6afecc LPASS_HW_DCODEC_VOTE LPASS_CLK_ATTRIBUTE_COUPLE_NO>;
+		clock-names = "mclk", "macro", "dcodec";
+		#clock-cells = <0>;
+		clock-output-names = "fsgen";
+		#sound-dai-cells = <1>;
+
+		pinctrl-0 = <&dmic01_default>, <&dmic23_default>, <&dmic45_default>;
+		pinctrl-names = "default";
+
+		/* stock tx-dmic-sample-rate */
+		qcom,dmic-sample-rate = <2400000>;
+	};
+};
+
+/* Adreno 660; a660_sqe.fw / a660_gmu.bin come from linux-firmware */
+&gpu {
+	status = "okay";
+};
+
+&gpu_zap_shader {
+	firmware-name = "qcom/sm8350/samsung/r9q/a660_zap.mbn";
+};
+
+/*
+ * Display: Samsung EA8082 AMB641ZR01, DSI0 command mode with DSC.
+ * dispcc reprograms the display PLLs, so the bootloader splash (simplefb)
+ * only lasts until the msm DRM driver takes over and re-initialises the panel.
+ */
+&mdss {
+	status = "okay";
+};
+
+&mdss_dsi0 {
+	vdda-supply = <&vreg_l6b_1p2>;
+
+	status = "okay";
+
+	panel@0 {
+		compatible = "samsung,ea8082-amb641zr01";
+		reg = <0>;
+
+		vddi-supply = <&vreg_l8c_1p8>;
+		vci-supply = <&panel_vci>;
+		reset-gpios = <&tlmm 22 GPIO_ACTIVE_LOW>;
+
+		pinctrl-0 = <&panel_reset_active>, <&panel_te_active>;
+		pinctrl-1 = <&panel_reset_suspend>, <&panel_te_suspend>;
+		pinctrl-names = "default", "sleep";
+
+		port {
+			panel_in: endpoint {
+				remote-endpoint = <&mdss_dsi0_out>;
+			};
+		};
+	};
+};
+
+&mdss_dsi0_out {
+	remote-endpoint = <&panel_in>;
+	data-lanes = <0 1 2 3>;
+};
+
+&mdss_dsi0_phy {
+	vdds-supply = <&vreg_l5b_0p88>;
+
+	status = "okay";
+};
+
+/*
+ * Crypto engine (crypto@1dfa000) and its BAM DMA: keep both ENABLED in the DT.
+ * - Binding qcrypto makes TrustZone freeze the SoC ~40 s later, so qcrypto is
+ *   blacklisted by the device package instead.
+ * - Disabling these nodes is worse: the phone then freezes ~30 s after every
+ *   boot (presumably Linux drops a clock/bus vote that TrustZone relies on).
+ */
+&qupv3_id_0 {
+	status = "okay";
+};
+
+/* MAX77705 (PMIC/charger/fuel gauge/USB-C) and SM5451 direct charger */
+/*
+ * The bootloader leaves QUP SE4 (touch I2C) in GSI mode, so geni-i2c needs
+ * the GPI DMA engine. Same channel mask (0x7e) and SID as the stock DT.
+ */
+&gpi_dma0 {
+	status = "okay";
+};
+
+&i2c4 {
+	clock-frequency = <400000>;
+	status = "okay";
+
+	/* Synaptics S3908 TouchComm on-cell touch (stock "synaptics,synaptics_ts") */
+	touchscreen@4b {
+		compatible = "syna,s3908";
+		reg = <0x4b>;
+
+		interrupts-extended = <&tlmm 23 IRQ_TYPE_LEVEL_LOW>;
+
+		/* No reset line on this board (GPIO22 is the panel reset) */
+		vdd-supply = <&vreg_l11c_1p8>;
+		avdd-supply = <&vreg_tsp_io>;
+
+		pinctrl-0 = <&ts_irq_default>;
+		pinctrl-names = "default";
+	};
+};
+
+/*
+ * Speaker amplifiers, stock cs35l41_l / cs35l41_r on qupv3_se5_i2c (1 MHz),
+ * both on primary MI2S. Powered straight from the battery (stock VA/VP are
+ * a dummy regulator). Stock only sets the boost peak current (4.1 A) and
+ * leaves the boost loop at the chip defaults (BSTCVRT_COEFF 0x2424,
+ * SLOPE_LBST 0x7500), which is what 1.0 uH / <20 uF programs here.
+ * Speaker protection firmware from the vendor partition:
+ * cirrus/cs35l41-dsp1-spk-prot-samsung-r9q-{top,bottom}.{wmfw,bin}.
+ * cirrus,calibration (patch 0025) is the factory calibration of THIS unit,
+ * from sec_efs/cirrus: rdc_cal{,_r}, temp_cal, vsc_cal{,_r}, isc_cal{,_r};
+ * another phone has to take its own values from there.
+ */
+&i2c5 {
+	clock-frequency = <1000000>;
+	status = "okay";
+
+	/* Bottom speaker, stock cs35l41_r ("cs35l40-bot", right channel) */
+	cs35l41_bottom: speaker-amp@40 {
+		compatible = "cirrus,cs35l41";
+		reg = <0x40>;
+		interrupts-extended = <&tlmm 26 IRQ_TYPE_LEVEL_LOW>;
+		reset-gpios = <&tlmm 93 GPIO_ACTIVE_HIGH>;
+		cirrus,boost-peak-milliamp = <4100>;
+		cirrus,boost-ind-nanohenry = <1000>;
+		cirrus,boost-cap-microfarad = <15>;
+		cirrus,asp-sdout-hiz = <3>;
+		cirrus,gpio2-src-select = <2>;
+		cirrus,gpio2-output-enable;
+		cirrus,subsystem-id = "samsung-r9q";
+		cirrus,calibration = <8564 36 16769867 16775710>;
+		sound-name-prefix = "Bottom";
+		#sound-dai-cells = <1>;
+
+		pinctrl-0 = <&cs35l41_default>;
+		pinctrl-names = "default";
+	};
+
+	/* Top speaker (earpiece), stock cs35l41_l ("cs35l40-rcv", left channel) */
+	cs35l41_top: speaker-amp@41 {
+		compatible = "cirrus,cs35l41";
+		reg = <0x41>;
+		interrupts-extended = <&tlmm 26 IRQ_TYPE_LEVEL_LOW>;
+		reset-gpios = <&tlmm 97 GPIO_ACTIVE_HIGH>;
+		cirrus,boost-peak-milliamp = <4100>;
+		cirrus,boost-ind-nanohenry = <1000>;
+		cirrus,boost-cap-microfarad = <15>;
+		cirrus,asp-sdout-hiz = <3>;
+		cirrus,gpio2-src-select = <2>;
+		cirrus,gpio2-output-enable;
+		cirrus,subsystem-id = "samsung-r9q";
+		cirrus,calibration = <8420 36 16770419 16774318>;
+		sound-name-prefix = "Top";
+		#sound-dai-cells = <1>;
+	};
+};
+
+/* Primary MI2S RX: data out to the amplifiers on SD1 (GPIO127, mi2s0_data1) */
+&q6afedai {
+	dai@16 {
+		reg = <PRIMARY_MI2S_RX>;
+		qcom,sd-lines = <1>;
+	};
+};
+
+&i2c7 {
+	clock-frequency = <400000>;
+	status = "okay";
+
+	/*
+	 * MAX77705 CCIC (Type-C + USB PD in its own firmware, driven through a
+	 * mailbox; driver from the Galaxy Tab S8+ port, patches 0010-0019).
+	 * It routes the MUIC D+/D- to the SoC (COM_USB), sets dwc3's role,
+	 * sources VBUS through the charger's OTG boost for a sink partner and,
+	 * as a sink, picks a fixed PDO of at most 9 V / 15 W after lowering the
+	 * charger input limit. Limits are enforced in the driver.
+	 */
+	typec@25 {
+		compatible = "maxim,max77705-usbc";
+		reg = <0x25>;
+		interrupt-parent = <&max77705>;
+		interrupts = <3>;
+		vbus-supply = <&max77705_otg_vbus>;
+		maxim,charger = <&max77705_charger>;
+
+		connector {
+			compatible = "usb-c-connector";
+			label = "USB-C";
+			power-role = "dual";
+			data-role = "dual";
+			try-power-role = "sink";
+			sink-pdos = <PDO_FIXED(5000, 3000, PDO_FIXED_DUAL_ROLE |
+						PDO_FIXED_HIGHER_CAP |
+						PDO_FIXED_USB_COMM |
+						PDO_FIXED_DATA_SWAP)
+				     PDO_FIXED(9000, 2000, 0)>;
+			op-sink-microwatt = <15000000>;
+
+			ports {
+				#address-cells = <1>;
+				#size-cells = <0>;
+
+				port@0 {
+					reg = <0>;
+
+					max77705_typec_hs: endpoint {
+						remote-endpoint = <&usb_1_dwc3_hs>;
+					};
+				};
+
+				/* SuperSpeed lanes: DisplayPort only, USB is HS */
+				port@1 {
+					reg = <1>;
+
+					max77705_typec_ss: endpoint {
+						remote-endpoint = <&usb_1_qmpphy_out>;
+					};
+				};
+
+				port@2 {
+					reg = <2>;
+
+					max77705_typec_sbu: endpoint {
+						remote-endpoint = <&usb_sbu_mux>;
+					};
+				};
+			};
+		};
+	};
+
+	fuel-gauge@36 {
+		compatible = "maxim,max77705-battery";
+		reg = <0x36>;
+		power-supplies = <&max77705_charger>;
+		/* stock: fuelgauge,fg_resistor = <2> */
+		maxim,rsns-microohm = <5000>;
+		interrupt-parent = <&max77705>;
+		interrupts = <2>;
+	};
+
+	max77705: pmic@66 {
+		compatible = "maxim,max77705";
+		reg = <0x66>;
+		interrupt-parent = <&pm8350c_gpios>;
+		interrupts = <5 IRQ_TYPE_LEVEL_LOW>;
+		interrupt-controller;
+		#interrupt-cells = <1>;
+		pinctrl-0 = <&if_pmic_irq>;
+		pinctrl-names = "default";
+
+		/*
+		 * Linear motor (stock max77705_vibrator, LINEAR_0832RC), driven by
+		 * a PWM from GCC GP2 on GPIO116. The MAX77705 divides the PWM by
+		 * 128; stock resonance haptic,frequency = 205.0 Hz (period 38109 ns,
+		 * stock FREQ_DIVIDER / freq). GP2 runs from the 19.2 MHz CXO through
+		 * an 8-bit M/N, which cannot make 26.24 kHz: use 25.6 kHz
+		 * (19.2 MHz / 5 / 150, exact) = 200 Hz at the motor. The motor
+		 * power is switched by GPIO198 (vib_power below).
+		 */
+		haptic {
+			compatible = "maxim,max77705-haptic";
+			haptic-supply = <&vib_power>;
+			pwms = <&vib_pwm 0 39063>;
+		};
+	};
+
+	max77705_charger: charger@69 {
+		compatible = "maxim,max77705-charger";
+		reg = <0x69>;
+		monitored-battery = <&battery>;
+		interrupt-parent = <&max77705>;
+		interrupts = <0>;
+
+		/* OTG boost, refused while a charger is present (patch 0010) */
+		max77705_otg_vbus: usb-otg-vbus {
+			regulator-name = "usb_otg_vbus";
+		};
+	};
+};
+
+&qup_i2c7_default {
+	/* As in the stock DT; the board relies on the SoC pull-ups */
+	/delete-property/ bias-disable;
+	bias-pull-up;
+};
+
+&pm8350c_gpios {
+	if_pmic_irq: if-pmic-irq-state {
+		pins = "gpio5";
+		function = PMIC_GPIO_FUNC_NORMAL;
+		power-source = <1>;
+		bias-disable;
+		input-enable;
+	};
+};
+
+&pcie0 {
+	pinctrl-0 = <&pcie0_default_state>;
+	pinctrl-names = "default";
+
+	perst-gpios = <&tlmm 94 GPIO_ACTIVE_LOW>;
+	wake-gpios = <&tlmm 96 GPIO_ACTIVE_HIGH>;
+
+	status = "okay";
+
+	pcie@0 {
+		wifi@0 {
+			compatible = "pci17cb,1103";
+			reg = <0x10000 0x0 0x0 0x0 0x0>;
+
+			/*
+			 * linux-firmware's WLAN.HSP.1.1 crashes (RDDM) on Samsung's
+			 * ELF board file; Samsung's own WLAN.HSP.2.0 works. Load it
+			 * from ath11k/WCN6855/hw2.1/samsung-r9q/ (firmware-samsung-r9q).
+			 */
+			firmware-name = "samsung-r9q";
+			qcom,calibration-variant = "Samsung_r9q";
+
+			vddrfacmn-supply = <&vreg_pmu_rfa_cmn_0p8>;
+			vddaon-supply = <&vreg_pmu_aon_0p8>;
+			vddwlcx-supply = <&vreg_pmu_wlcx_0p8>;
+			vddwlmx-supply = <&vreg_pmu_wlmx_0p8>;
+			vddpcie1p8-supply = <&vreg_pmu_pcie_1p8>;
+			vddpcie0p9-supply = <&vreg_pmu_pcie_0p9>;
+			vddrfa0p8-supply = <&vreg_pmu_rfa_0p8>;
+			vddrfa1p2-supply = <&vreg_pmu_rfa_1p2>;
+			vddrfa1p8-supply = <&vreg_pmu_rfa_1p7>;
+		};
+	};
+};
+
+&pcie0_phy {
+	vdda-phy-supply = <&vreg_l5b_0p88>;
+	vdda-pll-supply = <&vreg_l6b_1p2>;
+
+	status = "okay";
+};
+
+&pm8350_gpios {
+	vol_up_n: vol-up-n-state {
+		pins = "gpio6";
+		function = PMIC_GPIO_FUNC_NORMAL;
+		power-source = <1>;
+		bias-pull-up;
+		input-enable;
+	};
+};
+
+&pmk8350_rtc {
+	status = "okay";
+};
+
+/*
+ * No ADC channels are described for this board yet (stock uses it for the
+ * xo/skin/quiet thermistors): without children the driver fails the probe
+ * with -EINVAL on every boot.
+ */
+&pmk8350_vadc {
+	status = "disabled";
+};
+
+&pon_pwrkey {
+	status = "okay";
+};
+
+&pon_resin {
+	linux,code = <KEY_VOLUMEDOWN>;
+	status = "okay";
+};
+
+&tlmm {
+	/*
+	 * GPIOs owned by the secure world. Reading their config registers from
+	 * Linux makes TrustZone hang the SoC until the watchdog bites (seen as
+	 * the last log line "probing f100000.pinctrl with driver sm8350-tlmm").
+	 * 52-59 is what the Qualcomm SM8350 reference boards reserve. SE3
+	 * (17-19) stays reserved as a precaution. Not secure, despite earlier
+	 * guesses: GPIO16 (stock DP AUX switch enable, sde_dp_aux_en) and
+	 * 68-71 (QUP SE18, the Bluetooth UART in stock).
+	 */
+	gpio-reserved-ranges = <17 3>, <52 8>;
+};
+
+&ufs_mem_hc {
+	reset-gpios = <&tlmm 203 GPIO_ACTIVE_LOW>;
+
+	vcc-supply = <&vreg_l7b_2p96>;
+	vcc-max-microamp = <800000>;
+	vccq-supply = <&vreg_l9b_1p2>;
+	vccq-max-microamp = <900000>;
+	vdd-hba-supply = <&vreg_l9b_1p2>;
+
+	status = "okay";
+};
+
+&ufs_mem_phy {
+	vdda-phy-supply = <&vreg_l5b_0p88>;
+	vdda-pll-supply = <&vreg_l6b_1p2>;
+
+	status = "okay";
+};
+
+&usb_1 {
+	/*
+	 * USB 2.0 only: dwc3 runs on the HS PHY and the combo PHY's lanes go to
+	 * DisplayPort, so the pipe clock comes from UTMI.
+	 */
+	qcom,select-utmi-as-pipe-clk;
+
+	status = "okay";
+};
+
+/*
+ * Dual role, switched by the MAX77705 CCIC through the connector graph:
+ * host (with VBUS from the OTG boost) for a sink partner, device for a
+ * source (PC, charger). Start as a device so USB networking with the PC keeps
+ * working even if the Type-C driver is missing. USB 2.0 only for now.
+ */
+&usb_1_dwc3 {
+	dr_mode = "otg";
+	usb-role-switch;
+	role-switch-default-mode = "peripheral";
+	maximum-speed = "high-speed";
+	phys = <&usb_1_hsphy>;
+	phy-names = "usb2-phy";
+};
+
+&usb_1_dwc3_hs {
+	remote-endpoint = <&max77705_typec_hs>;
+};
+
+/*
+ * USB3/DP combo PHY, used for DisplayPort alternate mode only (dwc3 runs at
+ * high speed on the HS PHY). The MAX77705 driver sets its mode (4-lane DP
+ * for pin assignments C/E) and orientation. Supplies as stock's
+ * usb_qmp_dp_phy: vdd L1B 0.912 V, core L6B 1.2 V.
+ */
+&usb_1_qmpphy {
+	vdda-phy-supply = <&vreg_l1b_0p91>;
+	vdda-pll-supply = <&vreg_l6b_1p2>;
+
+	mode-switch;
+
+	status = "okay";
+};
+
+&usb_1_qmpphy_out {
+	remote-endpoint = <&max77705_typec_ss>;
+};
+
+&mdss_dp {
+	status = "okay";
+};
+
+&mdss_dp_out {
+	data-lanes = <0 1 2 3>;
+};
+
+&usb_1_hsphy {
+	vdda-pll-supply = <&vreg_l5b_0p88>;
+	vdda18-supply = <&vreg_l1c_1p8>;
+	vdda33-supply = <&vreg_l2b_3p07>;
+
+	status = "okay";
+};
+
+&tlmm {
+	bt_en: bt-en-state {
+		pins = "gpio65";
+		function = "gpio";
+		drive-strength = <16>;
+		output-low;
+		bias-pull-down;
+	};
+
+	pcie0_default_state: pcie0-default-state {
+		perst-pins {
+			pins = "gpio94";
+			function = "gpio";
+			drive-strength = <2>;
+			bias-pull-down;
+		};
+
+		clkreq-pins {
+			pins = "gpio95";
+			function = "pcie0_clkreqn";
+			drive-strength = <2>;
+			bias-pull-up;
+		};
+
+		wake-pins {
+			pins = "gpio96";
+			function = "gpio";
+			drive-strength = <2>;
+			bias-pull-up;
+		};
+	};
+
+	wlan_en: wlan-en-state {
+		pins = "gpio64";
+		function = "gpio";
+		drive-strength = <16>;
+		output-low;
+		bias-pull-down;
+	};
+
+	wlan_sw_ctrl: wlan-sw-ctrl-state {
+		pins = "gpio153";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-pull-down;
+	};
+
+	panel_reset_active: panel-reset-active-state {
+		pins = "gpio22";
+		function = "gpio";
+		drive-strength = <8>;
+		bias-disable;
+	};
+
+	panel_reset_suspend: panel-reset-suspend-state {
+		pins = "gpio22";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-pull-down;
+	};
+
+	panel_te_active: panel-te-active-state {
+		pins = "gpio82";
+		function = "mdp_vsync";
+		drive-strength = <2>;
+		bias-pull-down;
+	};
+
+	panel_te_suspend: panel-te-suspend-state {
+		pins = "gpio82";
+		function = "mdp_vsync";
+		drive-strength = <2>;
+		bias-pull-down;
+	};
+
+	ssc_proxy_int: ssc-proxy-int-state {
+		pins = "gpio89";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-disable;
+	};
+
+	ts_irq_default: ts-irq-default-state {
+		pins = "gpio23";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-disable;
+	};
+
+	tsp_io_en: tsp-io-en-state {
+		pins = "gpio50";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-disable;
+	};
+
+	panel_vci_en: panel-vci-en-state {
+		pins = "gpio166";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-disable;
+	};
+
+	/* stock sde_dp_aux_en_active / sde_dp_aux_sel_active */
+	dp_aux_en: dp-aux-en-state {
+		pins = "gpio16";
+		function = "gpio";
+		drive-strength = <8>;
+		bias-disable;
+	};
+
+	dp_aux_sel: dp-aux-sel-state {
+		pins = "gpio15";
+		function = "gpio";
+		drive-strength = <8>;
+		bias-disable;
+	};
+
+	/* stock cs35l41_gpio_default: shared IRQ GPIO26, resets GPIO93/97 */
+	cs35l41_default: cs35l41-default-state {
+		pins = "gpio26", "gpio93", "gpio97";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-disable;
+	};
+
+	/* Primary MI2S (stock pri_tdm_*_active): SCK, DATA0 in, DATA1 out, WS */
+	pri_mi2s_active: pri-mi2s-active-state {
+		sck-pins {
+			pins = "gpio125";
+			function = "mi2s0_sck";
+			drive-strength = <8>;
+			bias-disable;
+		};
+
+		data0-pins {
+			pins = "gpio126";
+			function = "mi2s0_data0";
+			drive-strength = <2>;
+			bias-disable;
+		};
+
+		data1-pins {
+			pins = "gpio127";
+			function = "mi2s0_data1";
+			drive-strength = <8>;
+			bias-disable;
+		};
+
+		ws-pins {
+			pins = "gpio128";
+			function = "mi2s0_ws";
+			drive-strength = <8>;
+			bias-disable;
+		};
+	};
+
+	vib_power_en: vib-power-en-state {
+		pins = "gpio198";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-disable;
+	};
+
+	/* stock motor_pwm_active / motor_pwm_suspend */
+	motor_pwm_active: motor-pwm-active-state {
+		pins = "gpio116";
+		function = "gcc_gp2";
+		drive-strength = <2>;
+		bias-disable;
+	};
+
+	motor_pwm_suspend: motor-pwm-suspend-state {
+		pins = "gpio116";
+		function = "gpio";
+		drive-strength = <2>;
+		bias-disable;
+		output-low;
+	};
+
+	/* Bluetooth UART, stock qupv3_se18_ctsrx / _rts / _tx (4-wire) */
+	bt_uart_ctsrx: bt-uart-ctsrx-state {
+		pins = "gpio68", "gpio71";
+		function = "qup18";
+		drive-strength = <2>;
+		bias-disable;
+	};
+
+	bt_uart_rts: bt-uart-rts-state {
+		pins = "gpio69";
+		function = "qup18";
+		drive-strength = <2>;
+		bias-pull-down;
+	};
+
+	bt_uart_tx: bt-uart-tx-state {
+		pins = "gpio70";
+		function = "qup18";
+		drive-strength = <2>;
+		bias-pull-up;
+	};
+};
+
+&qupv3_id_2 {
+	status = "okay";
+};
+
+/*
+ * QCA6490 Bluetooth (WCN6855 family, stock "bt_qca6490") on QUP SE18,
+ * powered through the wcn6855-pmu sequencer like Wi-Fi. Firmware from the
+ * vendor partition: qca/hpbtfw21.tlv and the NVM qca/hpnv21{,g}.baa
+ * (board id 0xaa), the names btqca looks for on its own.
+ */
+&uart18 {
+	pinctrl-0 = <&bt_uart_ctsrx>, <&bt_uart_rts>, <&bt_uart_tx>;
+	pinctrl-names = "default";
+
+	status = "okay";
+
+	bluetooth {
+		compatible = "qcom,wcn6855-bt";
+
+		vddrfacmn-supply = <&vreg_pmu_rfa_cmn_0p8>;
+		vddaon-supply = <&vreg_pmu_aon_0p8>;
+		vddwlcx-supply = <&vreg_pmu_wlcx_0p8>;
+		vddwlmx-supply = <&vreg_pmu_wlmx_0p8>;
+		vddbtcmx-supply = <&vreg_pmu_btcmx_0p8>;
+		vddrfa0p8-supply = <&vreg_pmu_rfa_0p8>;
+		vddrfa1p2-supply = <&vreg_pmu_rfa_1p2>;
+		vddrfa1p7-supply = <&vreg_pmu_rfa_1p7>;
+
+		max-speed = <3200000>;
+	};
+};
+
+/*
+ * CPU performance hints missing from sm8350.dtsi. Capacity and dynamic power
+ * coefficients from the stock DT (A55 1024/100, A78 1946/499, X1 2048/760):
+ * without them every core reported cpu_capacity 1024, so the scheduler saw
+ * the A55s as fast as the X1 and energy-aware scheduling was off.
+ * The OPP tables must list exactly the cpufreq-hw LUT frequencies; each one
+ * votes DDR (first value, stock LPDDR5 memlat table, floor) and L3 (second,
+ * 32 bytes per L3 clock, stock cpu->L3 table) bandwidth.
+ */
+&cpu0 {
+	capacity-dmips-mhz = <1024>;
+	dynamic-power-coefficient = <100>;
+	operating-points-v2 = <&cpu0_opp_table>;
+	interconnects = <&gem_noc MASTER_APPSS_PROC QCOM_ICC_TAG_ACTIVE_ONLY
+			 &mc_virt SLAVE_EBI1 QCOM_ICC_TAG_ACTIVE_ONLY>,
+			<&epss_l3 MASTER_EPSS_L3_APPS &epss_l3 SLAVE_EPSS_L3_SHARED>;
+};
+
+&cpu1 {
+	capacity-dmips-mhz = <1024>;
+	dynamic-power-coefficient = <100>;
+	operating-points-v2 = <&cpu0_opp_table>;
+	interconnects = <&gem_noc MASTER_APPSS_PROC QCOM_ICC_TAG_ACTIVE_ONLY
+			 &mc_virt SLAVE_EBI1 QCOM_ICC_TAG_ACTIVE_ONLY>,
+			<&epss_l3 MASTER_EPSS_L3_APPS &epss_l3 SLAVE_EPSS_L3_SHARED>;
+};
+
+&cpu2 {
+	capacity-dmips-mhz = <1024>;
+	dynamic-power-coefficient = <100>;
+	operating-points-v2 = <&cpu0_opp_table>;
+	interconnects = <&gem_noc MASTER_APPSS_PROC QCOM_ICC_TAG_ACTIVE_ONLY
+			 &mc_virt SLAVE_EBI1 QCOM_ICC_TAG_ACTIVE_ONLY>,
+			<&epss_l3 MASTER_EPSS_L3_APPS &epss_l3 SLAVE_EPSS_L3_SHARED>;
+};
+
+&cpu3 {
+	capacity-dmips-mhz = <1024>;
+	dynamic-power-coefficient = <100>;
+	operating-points-v2 = <&cpu0_opp_table>;
+	interconnects = <&gem_noc MASTER_APPSS_PROC QCOM_ICC_TAG_ACTIVE_ONLY
+			 &mc_virt SLAVE_EBI1 QCOM_ICC_TAG_ACTIVE_ONLY>,
+			<&epss_l3 MASTER_EPSS_L3_APPS &epss_l3 SLAVE_EPSS_L3_SHARED>;
+};
+
+&cpu4 {
+	capacity-dmips-mhz = <1946>;
+	dynamic-power-coefficient = <499>;
+	operating-points-v2 = <&cpu4_opp_table>;
+	interconnects = <&gem_noc MASTER_APPSS_PROC QCOM_ICC_TAG_ACTIVE_ONLY
+			 &mc_virt SLAVE_EBI1 QCOM_ICC_TAG_ACTIVE_ONLY>,
+			<&epss_l3 MASTER_EPSS_L3_APPS &epss_l3 SLAVE_EPSS_L3_SHARED>;
+};
+
+&cpu5 {
+	capacity-dmips-mhz = <1946>;
+	dynamic-power-coefficient = <499>;
+	operating-points-v2 = <&cpu4_opp_table>;
+	interconnects = <&gem_noc MASTER_APPSS_PROC QCOM_ICC_TAG_ACTIVE_ONLY
+			 &mc_virt SLAVE_EBI1 QCOM_ICC_TAG_ACTIVE_ONLY>,
+			<&epss_l3 MASTER_EPSS_L3_APPS &epss_l3 SLAVE_EPSS_L3_SHARED>;
+};
+
+&cpu6 {
+	capacity-dmips-mhz = <1946>;
+	dynamic-power-coefficient = <499>;
+	operating-points-v2 = <&cpu4_opp_table>;
+	interconnects = <&gem_noc MASTER_APPSS_PROC QCOM_ICC_TAG_ACTIVE_ONLY
+			 &mc_virt SLAVE_EBI1 QCOM_ICC_TAG_ACTIVE_ONLY>,
+			<&epss_l3 MASTER_EPSS_L3_APPS &epss_l3 SLAVE_EPSS_L3_SHARED>;
+};
+
+&cpu7 {
+	capacity-dmips-mhz = <2048>;
+	dynamic-power-coefficient = <760>;
+	operating-points-v2 = <&cpu7_opp_table>;
+	interconnects = <&gem_noc MASTER_APPSS_PROC QCOM_ICC_TAG_ACTIVE_ONLY
+			 &mc_virt SLAVE_EBI1 QCOM_ICC_TAG_ACTIVE_ONLY>,
+			<&epss_l3 MASTER_EPSS_L3_APPS &epss_l3 SLAVE_EPSS_L3_SHARED>;
+};
+
+/ {
+	cpu0_opp_table: opp-table-cpu0 {
+		compatible = "operating-points-v2";
+		opp-shared;
+
+		opp-300000000 {
+			opp-hz = /bits/ 64 <300000000>;
+			opp-peak-kBps = <762000 9600000>;
+		};
+
+		opp-403200000 {
+			opp-hz = /bits/ 64 <403200000>;
+			opp-peak-kBps = <762000 12902400>;
+		};
+
+		opp-499200000 {
+			opp-hz = /bits/ 64 <499200000>;
+			opp-peak-kBps = <762000 15974400>;
+		};
+
+		opp-595200000 {
+			opp-hz = /bits/ 64 <595200000>;
+			opp-peak-kBps = <762000 19660800>;
+		};
+
+		opp-691200000 {
+			opp-hz = /bits/ 64 <691200000>;
+			opp-peak-kBps = <762000 19660800>;
+		};
+
+		opp-806400000 {
+			opp-hz = /bits/ 64 <806400000>;
+			opp-peak-kBps = <1720000 22732800>;
+		};
+
+		opp-902400000 {
+			opp-hz = /bits/ 64 <902400000>;
+			opp-peak-kBps = <1720000 28262400>;
+		};
+
+		opp-998400000 {
+			opp-hz = /bits/ 64 <998400000>;
+			opp-peak-kBps = <1720000 31334400>;
+		};
+
+		opp-1094400000 {
+			opp-hz = /bits/ 64 <1094400000>;
+			opp-peak-kBps = <1720000 31334400>;
+		};
+
+		opp-1209600000 {
+			opp-hz = /bits/ 64 <1209600000>;
+			opp-peak-kBps = <2086000 33792000>;
+		};
+
+		opp-1305600000 {
+			opp-hz = /bits/ 64 <1305600000>;
+			opp-peak-kBps = <2086000 36864000>;
+		};
+
+		opp-1401600000 {
+			opp-hz = /bits/ 64 <1401600000>;
+			opp-peak-kBps = <2086000 39936000>;
+		};
+
+		opp-1497600000 {
+			opp-hz = /bits/ 64 <1497600000>;
+			opp-peak-kBps = <2929000 42393600>;
+		};
+
+		opp-1612800000 {
+			opp-hz = /bits/ 64 <1612800000>;
+			opp-peak-kBps = <2929000 45465600>;
+		};
+
+		opp-1708800000 {
+			opp-hz = /bits/ 64 <1708800000>;
+			opp-peak-kBps = <2929000 48537600>;
+		};
+
+		opp-1804800000 {
+			opp-hz = /bits/ 64 <1804800000>;
+			opp-peak-kBps = <5931000 50995200>;
+		};
+	};
+
+	cpu4_opp_table: opp-table-cpu4 {
+		compatible = "operating-points-v2";
+		opp-shared;
+
+		opp-710400000 {
+			opp-hz = /bits/ 64 <710400000>;
+			opp-peak-kBps = <1720000 15974400>;
+		};
+
+		opp-844800000 {
+			opp-hz = /bits/ 64 <844800000>;
+			opp-peak-kBps = <2086000 19660800>;
+		};
+
+		opp-960000000 {
+			opp-hz = /bits/ 64 <960000000>;
+			opp-peak-kBps = <2086000 19660800>;
+		};
+
+		opp-1075200000 {
+			opp-hz = /bits/ 64 <1075200000>;
+			opp-peak-kBps = <2929000 28262400>;
+		};
+
+		opp-1209600000 {
+			opp-hz = /bits/ 64 <1209600000>;
+			opp-peak-kBps = <2929000 28262400>;
+		};
+
+		opp-1324800000 {
+			opp-hz = /bits/ 64 <1324800000>;
+			opp-peak-kBps = <2929000 33792000>;
+		};
+
+		opp-1440000000 {
+			opp-hz = /bits/ 64 <1440000000>;
+			opp-peak-kBps = <2929000 33792000>;
+		};
+
+		opp-1555200000 {
+			opp-hz = /bits/ 64 <1555200000>;
+			opp-peak-kBps = <2929000 39936000>;
+		};
+
+		opp-1670400000 {
+			opp-hz = /bits/ 64 <1670400000>;
+			opp-peak-kBps = <2929000 39936000>;
+		};
+
+		opp-1766400000 {
+			opp-hz = /bits/ 64 <1766400000>;
+			opp-peak-kBps = <2929000 39936000>;
+		};
+
+		opp-1881600000 {
+			opp-hz = /bits/ 64 <1881600000>;
+			opp-peak-kBps = <5931000 42393600>;
+		};
+
+		opp-1996800000 {
+			opp-hz = /bits/ 64 <1996800000>;
+			opp-peak-kBps = <5931000 42393600>;
+		};
+
+		opp-2112000000 {
+			opp-hz = /bits/ 64 <2112000000>;
+			opp-peak-kBps = <5931000 42393600>;
+		};
+
+		opp-2227200000 {
+			opp-hz = /bits/ 64 <2227200000>;
+			opp-peak-kBps = <5931000 48537600>;
+		};
+
+		opp-2342400000 {
+			opp-hz = /bits/ 64 <2342400000>;
+			opp-peak-kBps = <5931000 48537600>;
+		};
+
+		opp-2419200000 {
+			opp-hz = /bits/ 64 <2419200000>;
+			opp-peak-kBps = <5931000 48537600>;
+		};
+	};
+
+	cpu7_opp_table: opp-table-cpu7 {
+		compatible = "operating-points-v2";
+		opp-shared;
+
+		opp-844800000 {
+			opp-hz = /bits/ 64 <844800000>;
+			opp-peak-kBps = <2086000 19660800>;
+		};
+
+		opp-960000000 {
+			opp-hz = /bits/ 64 <960000000>;
+			opp-peak-kBps = <2086000 19660800>;
+		};
+
+		opp-1075200000 {
+			opp-hz = /bits/ 64 <1075200000>;
+			opp-peak-kBps = <2929000 28262400>;
+		};
+
+		opp-1190400000 {
+			opp-hz = /bits/ 64 <1190400000>;
+			opp-peak-kBps = <2929000 28262400>;
+		};
+
+		opp-1305600000 {
+			opp-hz = /bits/ 64 <1305600000>;
+			opp-peak-kBps = <2929000 33792000>;
+		};
+
+		opp-1420800000 {
+			opp-hz = /bits/ 64 <1420800000>;
+			opp-peak-kBps = <2929000 33792000>;
+		};
+
+		opp-1555200000 {
+			opp-hz = /bits/ 64 <1555200000>;
+			opp-peak-kBps = <2929000 39936000>;
+		};
+
+		opp-1670400000 {
+			opp-hz = /bits/ 64 <1670400000>;
+			opp-peak-kBps = <2929000 39936000>;
+		};
+
+		opp-1785600000 {
+			opp-hz = /bits/ 64 <1785600000>;
+			opp-peak-kBps = <2929000 42393600>;
+		};
+
+		opp-1900800000 {
+			opp-hz = /bits/ 64 <1900800000>;
+			opp-peak-kBps = <5931000 42393600>;
+		};
+
+		opp-2035200000 {
+			opp-hz = /bits/ 64 <2035200000>;
+			opp-peak-kBps = <5931000 42393600>;
+		};
+
+		opp-2150400000 {
+			opp-hz = /bits/ 64 <2150400000>;
+			opp-peak-kBps = <5931000 48537600>;
+		};
+
+		opp-2265600000 {
+			opp-hz = /bits/ 64 <2265600000>;
+			opp-peak-kBps = <5931000 48537600>;
+		};
+
+		opp-2380800000 {
+			opp-hz = /bits/ 64 <2380800000>;
+			opp-peak-kBps = <5931000 48537600>;
+		};
+
+		opp-2496000000 {
+			opp-hz = /bits/ 64 <2496000000>;
+			opp-peak-kBps = <5931000 50995200>;
+		};
+
+		opp-2592000000 {
+			opp-hz = /bits/ 64 <2592000000>;
+			opp-peak-kBps = <7980000 50995200>;
+		};
+
+		opp-2688000000 {
+			opp-hz = /bits/ 64 <2688000000>;
+			opp-peak-kBps = <7980000 50995200>;
+		};
+
+		opp-2764800000 {
+			opp-hz = /bits/ 64 <2764800000>;
+			opp-peak-kBps = <7980000 50995200>;
+		};
+
+		opp-2841600000 {
+			opp-hz = /bits/ 64 <2841600000>;
+			opp-peak-kBps = <12191000 50995200>;
+		};
+	};
+};

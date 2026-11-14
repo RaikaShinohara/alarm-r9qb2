@@ -1,0 +1,39 @@
+From: RaikaShinohara <321751277+RaikaShinohara@users.noreply.github.com>
+Subject: [PATCH] clk: qcom: gcc-sm8350: use the general purpose clock ops for GP1-3
+
+The GP clocks feed PWMs (clk-pwm: the vibration motor on the Galaxy S21
+FE). With clk_rcg2_ops they only take the 50/100/200 MHz table entries,
+without M/N, so clk_set_duty_cycle() fails with -EINVAL. Use
+clk_rcg2_gp_ops, which computes M/N/pre-divider for any rate, as
+gcc-sdm845 does.
+
+---
+--- a/drivers/clk/qcom/gcc-sm8350.c
++++ b/drivers/clk/qcom/gcc-sm8350.c
+@@ -421,7 +421,7 @@
+ 		.parent_data = gcc_parent_data_1,
+ 		.num_parents = ARRAY_SIZE(gcc_parent_data_1),
+ 		.flags = CLK_SET_RATE_PARENT,
+-		.ops = &clk_rcg2_ops,
++		.ops = &clk_rcg2_gp_ops,
+ 	},
+ };
+ 
+@@ -436,7 +436,7 @@
+ 		.parent_data = gcc_parent_data_1,
+ 		.num_parents = ARRAY_SIZE(gcc_parent_data_1),
+ 		.flags = CLK_SET_RATE_PARENT,
+-		.ops = &clk_rcg2_ops,
++		.ops = &clk_rcg2_gp_ops,
+ 	},
+ };
+ 
+@@ -451,7 +451,7 @@
+ 		.parent_data = gcc_parent_data_1,
+ 		.num_parents = ARRAY_SIZE(gcc_parent_data_1),
+ 		.flags = CLK_SET_RATE_PARENT,
+-		.ops = &clk_rcg2_ops,
++		.ops = &clk_rcg2_gp_ops,
+ 	},
+ };
+ 
